@@ -93,6 +93,90 @@ describe("Open EasyX live cams", () => {
     expect(service.listFavorites().map((favorite) => favorite.username)).toEqual(["alice", "bob"]);
   });
 
+  it("refreshes followed status after 30 seconds even when favorites are consulted repeatedly", async () => {
+    const { plugins, service } = await fixture(); plugins.install("test.live");
+    vi.useFakeTimers();
+    try {
+      let online = false;
+      const followed = vi.fn(async () => ({ authoritative: true, cams: [
+        { id: "alice", username: "alice", pageUrl: "https://live.test/alice", online },
+      ] }));
+      plugins.get("test.live").listFollowedLiveCams = followed;
+      const query = { page: 1, pageSize: 24, favoritesOnly: true };
+      expect((await service.list(query)).items[0].online).toBe(false);
+      online = true;
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect((await service.list(query)).items[0].online).toBe(false);
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect((await service.list(query)).items[0].online).toBe(true);
+      expect(followed).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(["disconnected", "expired", "failed"])("checks public live status for saved favorites when the account is %s", async (state) => {
+    const { database, plugins, service } = await fixture(); plugins.install("test.live");
+    database.setLiveCamFavorite("test.live", { camId: "alice", username: "alice", pageUrl: "https://live.test/alice" }, true);
+    database.setLiveCamFavorite("test.live", { camId: "bob", username: "bob", pageUrl: "https://live.test/bob" }, true);
+    plugins.get("test.live").listFollowedLiveCams = async () => {
+      if (state === "failed") throw new Error("Network unreachable");
+      return { cams: [], authoritative: false, skippedReason: state };
+    };
+    await expect(service.list({ page: 1, pageSize: 24, favoritesOnly: true })).resolves.toMatchObject({
+      total: 2, items: [{ username: "alice", favorite: true, online: true }, { username: "bob", favorite: true, online: false }],
+    });
+    expect(database.listLiveCamFavorites("test.live")).toHaveLength(2);
+  });
+
+  it("refreshes local favorite status without perpetually reusing the last displayed cam", async () => {
+    const { database, plugins, service } = await fixture(); plugins.install("test.live");
+    database.setLiveCamFavorite("test.live", { camId: "alice", username: "alice", pageUrl: "https://live.test/alice" }, true);
+    const plugin = plugins.get("test.live");
+    plugin.listFollowedLiveCams = async () => ({ cams: [], authoritative: false });
+    let online = false;
+    plugin.listLiveCams = async (_context, query) => ({
+      cams: online ? [{ id: "alice", username: "alice", pageUrl: "https://live.test/alice" }] : [],
+      total: online ? 1 : 0, page: query.page, pageSize: query.pageSize, pages: 1,
+    });
+    vi.useFakeTimers();
+    try {
+      const query = { page: 1, pageSize: 24, favoritesOnly: true };
+      expect((await service.list(query)).items[0].online).toBe(false);
+      online = true;
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect((await service.list(query)).items[0].online).toBe(true);
+      online = false;
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect((await service.list(query)).items[0].online).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("checks a pending local favorite missing from an authoritative followed list", async () => {
+    const { plugins, service } = await fixture(); plugins.install("test.live");
+    const plugin = plugins.get("test.live");
+    plugin.setLiveCamFavorite = async () => ({ synchronized: false });
+    plugin.listFollowedLiveCams = async () => ({ cams: [], authoritative: true });
+    await service.setFavorite("test.live", { id: "alice", username: "alice", pageUrl: "https://live.test/alice" }, true);
+    await service.flushFavoriteChanges("test.live");
+    await expect(service.list({ page: 1, pageSize: 24, favoritesOnly: true })).resolves.toMatchObject({
+      total: 1, items: [{ username: "alice", online: true, favorite: true }],
+    });
+  });
+
+  it("isolates failed public lookups and requires an exact creator match", async () => {
+    const { database, plugins, service } = await fixture(); plugins.install("test.live");
+    for (const username of ["alice", "bob", "carol"]) database.setLiveCamFavorite("test.live", { camId: username, username, pageUrl: `https://live.test/${username}` }, true);
+    const plugin = plugins.get("test.live");
+    plugin.listFollowedLiveCams = async () => ({ cams: [], authoritative: false });
+    plugin.listLiveCams = async (_context, query) => {
+      if (query.search === "bob") throw new Error("Temporary error");
+      const username = query.search === "carol" ? "carol_other" : "ALICE";
+      return { cams: [{ id: username, username, pageUrl: `https://live.test/${username}` }], total: 1, page: 1, pageSize: query.pageSize, pages: 1 };
+    };
+    await expect(service.list({ page: 1, pageSize: 24, favoritesOnly: true })).resolves.toMatchObject({
+      total: 3, items: [{ username: "ALICE", online: true }, { username: "bob", online: false }, { username: "carol", online: false }],
+    });
+  });
+
   it("saves locally immediately and synchronizes the provider account in the background", async () => {
     const { database, plugins, service } = await fixture(); plugins.install("test.live");
     let remoteFavorite: boolean | undefined;

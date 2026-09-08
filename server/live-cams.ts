@@ -31,6 +31,7 @@ export class LiveCamService {
   private recentCams = new Map<string, { cam: PublicLiveCam; expiresAt: number }>();
   private favoriteSyncs = new Map<string, Promise<LiveCamFavoriteSyncResult>>();
   private favoriteSnapshots = new Map<string, { snapshot: LiveCamFavoriteSnapshot; expiresAt: number }>();
+  private favoriteStatuses = new Map<string, { cam: LiveCam; expiresAt: number }>();
   private favoriteWrites = new Map<string, Promise<void>>();
   private favoriteEpoch = new Map<string, number>();
 
@@ -67,20 +68,42 @@ export class LiveCamService {
           if (plugin.listFollowedLiveCams) {
             const epoch = this.favoriteEpoch.get(entry.manifest.id);
             const cached = this.favoriteSnapshots.get(entry.manifest.id);
-            const snapshot = cached && cached.expiresAt > Date.now()
+            const cacheFresh = cached && cached.expiresAt > Date.now();
+            const snapshot = cacheFresh
               ? cached.snapshot
               : await plugin.listFollowedLiveCams(this.plugins.context(entry.manifest.id, signal)).catch(() => ({ cams: [], authoritative: false }));
             if (snapshot.authoritative && epoch === this.favoriteEpoch.get(entry.manifest.id)) {
-              this.favoriteSnapshots.set(entry.manifest.id, { snapshot, expiresAt: Date.now() + 30_000 });
+              // Reading a cached snapshot must not extend its live-status lifetime.
+              if (!cacheFresh) this.favoriteSnapshots.set(entry.manifest.id, { snapshot, expiresAt: Date.now() + 30_000 });
               this.reconcileFavorites(entry.manifest.id, snapshot.cams);
             }
             const remote = new Map(snapshot.cams.map((cam) => [cam.username.toLowerCase(), cam]));
-            favorites = this.db.listLiveCamFavorites(entry.manifest.id).map((saved) => {
-              const key = saved.username.toLowerCase();
-              const recent = this.recentCams.get(`${entry.manifest.id}:${saved.camId.toLowerCase()}`);
-              return remote.get(key) ?? (recent && recent.expiresAt > Date.now() ? recent.cam : undefined)
-                ?? { ...saved, id: saved.camId, online: false };
-            }).filter((cam) => {
+            const savedFavorites = this.db.listLiveCamFavorites(entry.manifest.id);
+            favorites = [];
+            // Account synchronization can be unavailable while public rooms remain live.
+            // Bound fallback searches and keep their expiry independent of display caches.
+            for (let offset = 0; offset < savedFavorites.length; offset += 4) {
+              const batch = await Promise.all(savedFavorites.slice(offset, offset + 4).map(async (saved): Promise<LiveCam> => {
+                const followed = remote.get(saved.username.toLowerCase());
+                if (followed) return followed;
+                const key = `${entry.manifest.id}:${saved.camId.toLowerCase()}`;
+                const status = this.favoriteStatuses.get(key);
+                if (status && status.expiresAt > Date.now()) return status.cam;
+                const offline = { ...saved, id: saved.camId, viewers: 0, online: false };
+                try {
+                  const result = await plugin.listLiveCams!(this.plugins.context(entry.manifest.id, signal), { page: 1, pageSize: 48, search: saved.username });
+                  const match = result.cams.find((cam) => cam.username.toLowerCase() === saved.username.toLowerCase() || cam.id.toLowerCase() === saved.camId.toLowerCase());
+                  const cam = match ? { ...match, online: match.online !== false } : offline;
+                  this.favoriteStatuses.set(key, { cam, expiresAt: Date.now() + 30_000 });
+                  return cam;
+                } catch {
+                  const recent = this.recentCams.get(key);
+                  return recent && recent.expiresAt > Date.now() ? recent.cam : offline;
+                }
+              }));
+              favorites.push(...batch);
+            }
+            favorites = favorites.filter((cam) => {
               if (query.search) {
                 const needle = query.search.toLowerCase();
                 if (!`${cam.username} ${cam.title ?? ""} ${(cam.tags ?? []).join(" ")}`.toLowerCase().includes(needle)) return false;
@@ -133,7 +156,8 @@ export class LiveCamService {
       const performers = this.db.listPerformers();
       const normalized = cams.filter((cam) => pluginMatchesSource(entry.manifest, cam.pageUrl))
         .map((cam) => this.linkPerformer({ ...cam, providerId: entry.manifest.id, providerName: entry.manifest.name, favorite: this.db.isLiveCamFavorite(entry.manifest.id, cam.username) }, performers));
-      for (const cam of normalized) this.recentCams.set(`${entry.manifest.id}:${cam.id.toLowerCase()}`, { cam, expiresAt: Date.now() + 120_000 });
+      // A rendered favorite may itself come from a cache or an offline placeholder.
+      if (!favoritesOnly) for (const cam of normalized) this.recentCams.set(`${entry.manifest.id}:${cam.id.toLowerCase()}`, { cam, expiresAt: Date.now() + 120_000 });
       return {
         items: normalized,
         total,
