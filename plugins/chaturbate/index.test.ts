@@ -128,4 +128,31 @@ describe("Chaturbate plugin", () => {
     ]);
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({ method: "POST", headers: expect.objectContaining({ "x-csrftoken": "csrf-token" }) });
   });
+
+  it.each(["public", "offline", "private"])("checks the exact room status for a %s creator without catalogue search", async (status) => {
+    const fetchMock = vi.fn(async (_input: string | URL | Request) => new Response(JSON.stringify({ room_status: status, broadcaster_username: "Alice", room_title: "Alice's room", num_viewers: 42, broadcaster_gender: "f" })));
+    const context = accountContext(fetchMock as typeof fetch);
+    const cam = await chaturbate.getLiveCam!(context, { id: "alice", username: "alice", pageUrl: "https://chaturbate.com/alice/" });
+    expect(cam).toMatchObject({ online: status === "public", viewers: status === "public" ? 42 : 0, statusUnavailable: false, title: "Alice's room" });
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("https://chaturbate.com/api/chatvideocontext/alice/");
+  });
+
+  it("does not mistake an invalid room response for an offline creator", async () => {
+    const context = accountContext(async () => new Response(JSON.stringify({ error: "temporarily unavailable" })));
+    await expect(chaturbate.getLiveCam!(context, { id: "alice", username: "alice", pageUrl: "https://chaturbate.com/alice/" })).rejects.toThrow("valid room status");
+  });
+
+  it("backs off exact status requests after provider rate limiting", async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const request = vi.fn().mockResolvedValueOnce(new Response("", { status: 429 })).mockResolvedValue(new Response(JSON.stringify({ room_status: "public" })));
+      const context = accountContext(request);
+      const cam = { id: "alice", username: "alice", pageUrl: "https://chaturbate.com/alice/" };
+      await expect(chaturbate.getLiveCam!(context, cam)).rejects.toThrow("HTTP 429");
+      await expect(chaturbate.getLiveCam!(context, cam)).rejects.toThrow("limiting status checks");
+      expect(request).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(60_001);
+      await expect(chaturbate.getLiveCam!(context, cam)).resolves.toMatchObject({ online: true });
+    } finally { vi.useRealTimers(); }
+  });
 });

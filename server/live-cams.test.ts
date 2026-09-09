@@ -162,6 +162,42 @@ describe("Open EasyX live cams", () => {
     });
   });
 
+  it("uses exact room status and opens a favorite outside the provider's limited search catalogue", async () => {
+    const { database, plugins, service } = await fixture(); plugins.install("test.live");
+    database.setLiveCamFavorite("test.live", { camId: "outside", username: "outside", pageUrl: "https://live.test/outside" }, true);
+    const plugin = plugins.get("test.live");
+    plugin.listFollowedLiveCams = async () => ({ cams: [], authoritative: false, skippedReason: "Session expired" });
+    const search = vi.fn(plugin.listLiveCams!); plugin.listLiveCams = search;
+    plugin.getLiveCam = async (_context, cam) => ({ ...cam, online: true, viewers: 20 });
+    await expect(service.list({ page: 1, pageSize: 24, favoritesOnly: true })).resolves.toMatchObject({
+      total: 1, items: [{ username: "outside", online: true }], providers: [{ warning: "Session expired" }],
+    });
+    await expect(service.get("test.live", "outside")).resolves.toMatchObject({ username: "outside", online: true });
+    expect(search).not.toHaveBeenCalled();
+  });
+
+  it("keeps failed live checks distinguishable from offline rooms and backs off retries", async () => {
+    const { database, plugins, service } = await fixture(); plugins.install("test.live");
+    database.setLiveCamFavorite("test.live", { camId: "alice", username: "alice", pageUrl: "https://live.test/alice" }, true);
+    const plugin = plugins.get("test.live");
+    plugin.listFollowedLiveCams = async () => ({ cams: [], authoritative: false, skippedReason: "Session expired" });
+    const lookup = vi.fn(async () => { throw new Error("HTTP 429"); }); plugin.getLiveCam = lookup;
+    const query = { page: 1, pageSize: 24, favoritesOnly: true };
+    for (let count = 0; count < 2; count++) await expect(service.list(query)).resolves.toMatchObject({
+      total: 1, items: [{ username: "alice", statusUnavailable: true }], providers: [{ warning: "Session expired" }],
+    });
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(database.listLiveCamFavorites("test.live")).toHaveLength(1);
+  });
+
+  it("reports account import failures even before any favorites have been imported", async () => {
+    const { plugins, service } = await fixture(); plugins.install("test.live");
+    plugins.get("test.live").listFollowedLiveCams = async () => { throw new Error("Reconnect the account"); };
+    await expect(service.list({ page: 1, pageSize: 24, favoritesOnly: true })).resolves.toMatchObject({
+      total: 0, items: [], providers: [{ warning: "Reconnect the account" }],
+    });
+  });
+
   it("isolates failed public lookups and requires an exact creator match", async () => {
     const { database, plugins, service } = await fixture(); plugins.install("test.live");
     for (const username of ["alice", "bob", "carol"]) database.setLiveCamFavorite("test.live", { camId: username, username, pageUrl: `https://live.test/${username}` }, true);

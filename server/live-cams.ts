@@ -5,7 +5,7 @@ import type { Database, LiveCamFavorite, Performer, Source } from "./database.js
 import { PluginManager, pluginMatchesSource } from "./plugin-manager.js";
 
 export type PublicLiveCam = LiveCam & { providerId: string; providerName: string; favorite: boolean; performerId?: string };
-export type LiveCamProviderStatus = { id: string; name: string; ok: boolean; count: number; pending?: boolean; error?: string };
+export type LiveCamProviderStatus = { id: string; name: string; ok: boolean; count: number; pending?: boolean; error?: string; warning?: string };
 export type LiveCamResult = {
   items: PublicLiveCam[]; total: number; page: number; pageSize: number; pages: number;
   providers: LiveCamProviderStatus[]; complete?: boolean;
@@ -62,6 +62,7 @@ export class LiveCamService {
     try {
       let cams: LiveCam[] = [];
       let total = 0;
+      let warning: string | undefined;
       if (plugin.listLiveCams) {
         if (favoritesOnly) {
           let favorites: LiveCam[];
@@ -71,7 +72,8 @@ export class LiveCamService {
             const cacheFresh = cached && cached.expiresAt > Date.now();
             const snapshot = cacheFresh
               ? cached.snapshot
-              : await plugin.listFollowedLiveCams(this.plugins.context(entry.manifest.id, signal)).catch(() => ({ cams: [], authoritative: false }));
+              : await plugin.listFollowedLiveCams(this.plugins.context(entry.manifest.id, signal)).catch((error): LiveCamFavoriteSnapshot => ({ cams: [], authoritative: false, skippedReason: error instanceof Error ? error.message : String(error) }));
+            if (!snapshot.authoritative) warning = snapshot.skippedReason ?? "Account favorites could not be synchronized. Local favorites are still saved.";
             if (snapshot.authoritative && epoch === this.favoriteEpoch.get(entry.manifest.id)) {
               // Reading a cached snapshot must not extend its live-status lifetime.
               if (!cacheFresh) this.favoriteSnapshots.set(entry.manifest.id, { snapshot, expiresAt: Date.now() + 30_000 });
@@ -91,14 +93,23 @@ export class LiveCamService {
                 if (status && status.expiresAt > Date.now()) return status.cam;
                 const offline = { ...saved, id: saved.camId, viewers: 0, online: false };
                 try {
-                  const result = await plugin.listLiveCams!(this.plugins.context(entry.manifest.id, signal), { page: 1, pageSize: 48, search: saved.username });
-                  const match = result.cams.find((cam) => cam.username.toLowerCase() === saved.username.toLowerCase() || cam.id.toLowerCase() === saved.camId.toLowerCase());
-                  const cam = match ? { ...match, online: match.online !== false } : offline;
-                  this.favoriteStatuses.set(key, { cam, expiresAt: Date.now() + 30_000 });
+                  signal?.throwIfAborted();
+                  const context = this.plugins.context(entry.manifest.id, signal);
+                  let cam: LiveCam;
+                  if (plugin.getLiveCam) cam = await plugin.getLiveCam(context, { ...saved, id: saved.camId });
+                  else {
+                    const result = await plugin.listLiveCams!(context, { page: 1, pageSize: 48, search: saved.username });
+                    const match = result.cams.find((cam) => cam.username.toLowerCase() === saved.username.toLowerCase() || cam.id.toLowerCase() === saved.camId.toLowerCase());
+                    cam = match ? { ...match, online: match.online !== false } : offline;
+                  }
+                  this.favoriteStatuses.set(key, { cam, expiresAt: Date.now() + (plugin.getLiveCam ? 60_000 : 30_000) });
                   return cam;
-                } catch {
+                } catch (error) {
+                  warning ??= error instanceof Error ? error.message : String(error);
                   const recent = this.recentCams.get(key);
-                  return recent && recent.expiresAt > Date.now() ? recent.cam : offline;
+                  const cam = { ...(recent?.cam ?? offline), statusUnavailable: true };
+                  if (!signal?.aborted) this.favoriteStatuses.set(key, { cam, expiresAt: Date.now() + 60_000 });
+                  return cam;
                 }
               }));
               favorites.push(...batch);
@@ -109,7 +120,7 @@ export class LiveCamService {
                 if (!`${cam.username} ${cam.title ?? ""} ${(cam.tags ?? []).join(" ")}`.toLowerCase().includes(needle)) return false;
               }
               return !query.gender || cam.gender === query.gender || cam.gender === query.gender[0];
-            }).sort((left, right) => Number(right.online) - Number(left.online) || whole(right.viewers) - whole(left.viewers) || left.username.localeCompare(right.username));
+            }).sort((left, right) => Number(!right.statusUnavailable && right.online !== false) - Number(!left.statusUnavailable && left.online !== false) || whole(right.viewers) - whole(left.viewers) || left.username.localeCompare(right.username));
           } else {
             const savedFavorites = this.db.listLiveCamFavorites(entry.manifest.id);
             const discovered = await Promise.all(savedFavorites.map(async (favorite) => {
@@ -161,7 +172,7 @@ export class LiveCamService {
       return {
         items: normalized,
         total,
-        status: { id: entry.manifest.id, name: entry.manifest.name, ok: true, count: total },
+        status: { id: entry.manifest.id, name: entry.manifest.name, ok: true, count: total, ...(warning ? { warning } : {}) },
       };
     } catch (error) {
       return {
@@ -181,7 +192,7 @@ export class LiveCamService {
     const providerResults = query.providerId ? (selected ? [selected] : []) : [...results.values()];
     const unique = new Map<string, PublicLiveCam>();
     for (const cam of providerResults.flatMap((result) => result.items)) unique.set(`${cam.providerId}:${cam.username.toLowerCase()}`, cam);
-    let ranked = [...unique.values()].sort((left, right) => whole(right.viewers) - whole(left.viewers) || left.username.localeCompare(right.username));
+    let ranked = [...unique.values()].sort((left, right) => Number(!right.statusUnavailable && right.online !== false) - Number(!left.statusUnavailable && left.online !== false) || whole(right.viewers) - whole(left.viewers) || left.username.localeCompare(right.username));
     if (!query.providerId) ranked = ranked.slice((query.page - 1) * query.pageSize, query.page * query.pageSize);
     const total = providerResults.reduce((sum, result) => sum + result.total, 0);
     const providers = entries.map((entry) => results.get(entry.manifest.id)?.status ?? {
@@ -225,6 +236,13 @@ export class LiveCamService {
     if (!entry) throw Object.assign(new Error("The selected live-cam plugin is not installed"), { statusCode: 404 });
     const cached = this.recentCams.get(`${providerId}:${camId.toLowerCase()}`);
     if (cached && cached.expiresAt > Date.now()) return this.linkPerformer({ ...cached.cam, favorite: this.db.isLiveCamFavorite(providerId, cached.cam.username) });
+    const plugin = this.plugins.get(providerId);
+    const saved = this.db.listLiveCamFavorites(providerId).find((cam) => cam.camId.toLowerCase() === camId.toLowerCase() || cam.username.toLowerCase() === camId.toLowerCase());
+    if (plugin.getLiveCam && saved) {
+      const cam = await plugin.getLiveCam(this.plugins.context(providerId), { ...saved, id: saved.camId });
+      if (cam.online === false) throw Object.assign(new Error("This cam is no longer live"), { statusCode: 404 });
+      return this.linkPerformer({ ...cam, providerId, providerName: entry.manifest.name, favorite: true });
+    }
     const result = await this.listProvider(entry, { page: 1, pageSize: 48, search: camId });
     if (!result.status.ok) throw Object.assign(new Error(result.status.error ?? "The live provider could not be reached"), { statusCode: 502 });
     const needle = camId.toLowerCase();

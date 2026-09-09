@@ -11,11 +11,21 @@ import "./live-player.css";
 
 export type LiveCam = {
   id: string; username: string; title?: string; pageUrl: string; thumbnailUrl?: string; viewers?: number; age?: number; gender?: string; tags?: string[];
-  providerId: string; providerName: string; favorite?: boolean; online?: boolean; performerId?: string;
+  providerId: string; providerName: string; favorite?: boolean; online?: boolean; performerId?: string; statusUnavailable?: boolean;
 };
 type LiveCamFavorite = Pick<LiveCam, "providerId" | "id" | "username" | "title" | "pageUrl" | "thumbnailUrl">;
-type Provider = { id: string; name: string; ok: boolean; count: number; pending?: boolean; error?: string };
+type Provider = { id: string; name: string; ok: boolean; count: number; pending?: boolean; error?: string; warning?: string };
 type LiveCamResult = { available: boolean; reason?: string; items: LiveCam[]; total: number; page: number; pageSize: number; pages: number; providers: Provider[]; complete?: boolean };
+
+export function mergeLiveCamRefresh(previous: LiveCamResult | null, next: LiveCamResult): LiveCamResult {
+  if (!previous || next.complete) return next;
+  const pending = new Set(next.providers.filter((provider) => provider.pending).map((provider) => provider.id));
+  const retained = previous.items.filter((cam) => pending.has(cam.providerId));
+  const total = next.total + previous.providers.filter((provider) => pending.has(provider.id)).reduce((sum, provider) => sum + provider.count, 0);
+  return { ...next, total, pages: Math.max(1, Math.ceil(total / next.pageSize)),
+    items: [...next.items, ...retained].sort((a, b) => Number(!b.statusUnavailable && b.online !== false) - Number(!a.statusUnavailable && a.online !== false) || (b.viewers ?? 0) - (a.viewers ?? 0)).slice(0, next.pageSize),
+  };
+}
 export type LiveCamPreset = { query?: string; providerId?: string; gender?: "female" | "male" | "couple" | "trans" | ""; favoritesOnly?: boolean; page?: number };
 
 export function liveCamPresetFromSearch(search: string): LiveCamPreset {
@@ -225,14 +235,15 @@ export function LiveCamPerformerButton({ cam }: { cam: LiveCam }) {
 }
 
 export function LiveCamCard({ cam, open }: { cam: LiveCam; open: (cam: LiveCam) => void }) {
-  const offline = cam.online === false;
+  const unavailable = Boolean(cam.statusUnavailable);
+  const offline = cam.online === false || unavailable;
   return <a className={`live-card${offline ? " offline" : ""}`} href={offline ? undefined : liveCamUrl(cam)} aria-disabled={offline || undefined} onClick={(event) => {
     if (offline) { event.preventDefault(); return; }
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault(); open(cam);
   }}>
-    <span className="live-thumb">{cam.thumbnailUrl ? <img src={cam.thumbnailUrl} alt="" loading="lazy" onError={(event) => { event.currentTarget.hidden = true; }}/> : <Users/>}<i>{offline ? "OFFLINE" : "LIVE"}</i><em>{offline ? "Offline" : <><Eye/>{Number(cam.viewers ?? 0).toLocaleString()}</>}</em><strong>{cam.providerName}</strong>{!offline && <span><Play/></span>}</span>
-    <span className="live-copy"><b>{cam.username}</b>{cam.age ? <i>{cam.age}</i> : null}<small>{cam.title && cam.title !== cam.username ? cam.title : (cam.tags?.slice(0, 3).map((tag) => `#${tag}`).join(" ") || (offline ? "Not broadcasting right now" : "Public live broadcast"))}</small></span>
+    <span className="live-thumb">{cam.thumbnailUrl ? <img src={cam.thumbnailUrl} alt="" loading="lazy" onError={(event) => { event.currentTarget.hidden = true; }}/> : <Users/>}<i>{unavailable ? "STATUS UNAVAILABLE" : offline ? "OFFLINE" : "LIVE"}</i><em>{unavailable ? "Retry shortly" : offline ? "Offline" : <><Eye/>{Number(cam.viewers ?? 0).toLocaleString()}</>}</em><strong>{cam.providerName}</strong>{!offline && <span><Play/></span>}</span>
+    <span className="live-copy"><b>{cam.username}</b>{cam.age ? <i>{cam.age}</i> : null}<small>{unavailable ? "Could not check live status. Your favorite is saved." : cam.title && cam.title !== cam.username ? cam.title : (cam.tags?.slice(0, 3).map((tag) => `#${tag}`).join(" ") || (offline ? "Not broadcasting right now" : "Public live broadcast"))}</small></span>
   </a>;
 }
 
@@ -264,6 +275,7 @@ export function LiveCamPage({ preset, route, open }: { preset: LiveCamPreset; ro
   const [gender, setGender] = useState<LiveCamPreset["gender"]>(preset.gender ?? ""); const [favoritesOnly, setFavoritesOnly] = useState(Boolean(preset.favoritesOnly)); const [page, setPage] = useState(preset.page ?? 1);
   const [favorites, setFavorites] = useState<LiveCamFavorite[]>([]);
   const [loading, setLoading] = useState(true); const [refresh, setRefresh] = useState(0);
+  const lastQuery = useRef("");
   const params = useMemo(() => new URLSearchParams({ page: String(page), pageSize: "24", search, providerId, gender: gender ?? "", favoritesOnly: favoritesOnly ? "1" : "" }), [page, search, providerId, gender, favoritesOnly]);
   useEffect(() => {
     const syncFromLocation = () => {
@@ -281,8 +293,9 @@ export function LiveCamPage({ preset, route, open }: { preset: LiveCamPreset; ro
     return () => window.removeEventListener("easyx:live-favorites", loadFavorites);
   }, []);
   useEffect(() => {
+    const sameQuery = lastQuery.current === params.toString(); lastQuery.current = params.toString();
     const controller = new AbortController(); let events: EventSource | undefined; let complete = false; const timer = window.setTimeout(() => {
-      setLoading(true); setResult(null);
+      setLoading(true); if (!sameQuery) setResult(null);
       const fallback = () => void api<LiveCamResult>(`/api/live-cams?${params}`, { signal: controller.signal }).then(setResult).catch((reason) => {
         if (reason instanceof DOMException && reason.name === "AbortError") return;
         setResult({ available: false, reason: reason instanceof Error ? reason.message : String(reason), items: [], total: 0, page, pageSize: 24, pages: 1, providers: [] });
@@ -291,7 +304,7 @@ export function LiveCamPage({ preset, route, open }: { preset: LiveCamPreset; ro
       events = new EventSource(`/api/live-cams/events?${params}`);
       events.onmessage = (event) => {
         const next = JSON.parse(event.data) as Omit<LiveCamResult, "available">;
-        setResult({ available: true, ...next });
+        setResult((previous) => mergeLiveCamRefresh(sameQuery ? previous : null, { available: true, ...next }));
         if (next.complete) { complete = true; setLoading(false); events?.close(); }
       };
       events.onerror = () => { events?.close(); if (!complete) fallback(); };
@@ -306,8 +319,10 @@ export function LiveCamPage({ preset, route, open }: { preset: LiveCamPreset; ro
   const reset = (action: () => void) => { action(); setPage(1); };
   const providers = result?.providers ?? []; const allCount = providers.filter((provider) => provider.ok && !provider.pending).reduce((sum, provider) => sum + provider.count, 0);
   const loadedProviders = providers.filter((provider) => !provider.pending).length;
-  const onlineFavorites = favoritesOnly ? result?.items.filter((cam) => cam.online !== false) ?? [] : [];
-  const offlineFavorites = favoritesOnly ? result?.items.filter((cam) => cam.online === false) ?? [] : [];
+  const onlineFavorites = favoritesOnly ? result?.items.filter((cam) => cam.online !== false && !cam.statusUnavailable) ?? [] : [];
+  const offlineFavorites = favoritesOnly ? result?.items.filter((cam) => cam.online === false && !cam.statusUnavailable) ?? [] : [];
+  const unknownFavorites = favoritesOnly ? result?.items.filter((cam) => cam.statusUnavailable) ?? [] : [];
+  const favoriteWarnings = favoritesOnly ? result?.providers.filter((provider) => (!providerId || provider.id === providerId) && (provider.warning || provider.error)) ?? [] : [];
   const camGrid = (items: LiveCam[]) => <div className="live-grid">{items.map((cam) => <LiveCamCard cam={cam} open={open} key={`${cam.providerId}:${cam.id}`}/>)}</div>;
   return <section className="live-page">
     <div className="library-intro live-intro"><div><p>LIVE NOW</p><h2>Live Cam</h2><span>Public live rooms aggregated by your installed Open EasyX source plugins</span></div><button className="quiet" onClick={() => setRefresh((value) => value + 1)} disabled={loading}><RefreshCw className={loading ? "spin" : ""}/>Refresh</button></div>
@@ -316,14 +331,15 @@ export function LiveCamPage({ preset, route, open }: { preset: LiveCamPreset; ro
       <label><Radio/><select aria-label="Filter live provider" value={providerId} onChange={(event) => reset(() => setProviderId(event.target.value))}><option value="">All live sources ({allCount.toLocaleString()}{loading ? "+" : ""})</option>{providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name} ({provider.pending ? "loading…" : provider.count.toLocaleString()})</option>)}</select></label>
       <div className="live-genders"><button className={favoritesOnly ? "active favorite" : "favorite"} onClick={() => reset(() => setFavoritesOnly((value) => !value))}><Star fill={favoritesOnly ? "currentColor" : "none"}/>Favorites</button><button className={!gender ? "active" : ""} onClick={() => reset(() => setGender(""))}>All</button>{[["female", "Women"], ["male", "Men"], ["couple", "Couples"], ["trans", "Trans"]].map(([value, label]) => <button key={value} className={gender === value ? "active" : ""} onClick={() => reset(() => setGender(value as LiveCamPreset["gender"]))}>{label}</button>)}</div>
     </div>}
+    {favoriteWarnings.length > 0 && <div className="live-provider-notices" role="status">{favoriteWarnings.map((provider) => <p key={provider.id}><b>{provider.name}:</b> {provider.warning || provider.error}</p>)}<a href="/plugins">Check account sessions in Plugins</a></div>}
     {loading && !result ? <div className="loading"><LoaderCircle className="spin"/>Loading live cams…</div>
       : result?.available === false ? <LiveCamUnavailable reason={result.reason ?? "No live-cam provider is available in Open EasyX."}/>
       : result && !result.providers.length ? <div className="live-unavailable compact"><span><Radio/></span><h2>No live-cam plugin installed</h2><small>Install a live provider such as Chaturbate Live from Plugins. It will appear here automatically.</small></div>
       : result?.items.length ? <>
         <div className="live-summary"><b>{result.total.toLocaleString()}{loading ? "+" : ""} {favoritesOnly ? (result.total === 1 ? "favorite creator" : "favorite creators") : (result.total === 1 ? "live cam" : "live cams")}</b><span>{loading ? `Loading sources ${loadedProviders}/${result.providers.length}` : favoritesOnly ? `${onlineFavorites.length} live on this page` : `${result.providers.filter((provider) => provider.ok && provider.count > 0).length} active sources`}</span></div>
-        {favoritesOnly ? <div className="favorite-live-sections">{onlineFavorites.length > 0 && <section><h3><i/>Live now</h3>{camGrid(onlineFavorites)}</section>}{offlineFavorites.length > 0 && <section className="offline"><h3><i/>Offline</h3>{camGrid(offlineFavorites)}</section>}</div> : camGrid(result.items)}
+        {favoritesOnly ? <div className="favorite-live-sections">{onlineFavorites.length > 0 && <section><h3><i/>Live now</h3>{camGrid(onlineFavorites)}</section>}{unknownFavorites.length > 0 && <section className="offline"><h3><i/>Status unavailable</h3>{camGrid(unknownFavorites)}</section>}{offlineFavorites.length > 0 && <section className="offline"><h3><i/>Offline</h3>{camGrid(offlineFavorites)}</section>}</div> : camGrid(result.items)}
         {result.pages > 1 && <div className="pagination"><button disabled={page <= 1 || loading} onClick={() => setPage(page - 1)}>Previous</button><span>Page {page} of {result.pages}</span><button disabled={page >= result.pages || loading} onClick={() => setPage(page + 1)}>Next</button></div>}
       </> : loading && result ? <div className="loading"><LoaderCircle className="spin"/>Loading sources {loadedProviders}/{result.providers.length}… {result.total.toLocaleString()} live cams found</div>
-      : <div className="live-unavailable compact"><span>{favoritesOnly ? <Star/> : <Radio/>}</span><h2>{favoritesOnly ? (favorites.length ? "Your favorite creators are offline" : "No favorite creators yet") : "No public cams are live"}</h2><small>{favoritesOnly ? (favorites.length ? "They will appear here automatically when they go live again." : "Open a live stream and select Favorite creator to add it here.") : "Try another source or filter. Installed providers are refreshed every 30 seconds."}</small>{result?.providers.filter((provider) => !provider.ok).map((provider) => <p key={provider.id}>{provider.name}: {provider.error}</p>)}</div>}
+      : <div className="live-unavailable compact"><span>{favoritesOnly ? <Star/> : <Radio/>}</span><h2>{favoritesOnly ? (favoriteWarnings.length ? "Favorites could not be synchronized" : favorites.length ? "No favorites match these filters" : "No favorite creators yet") : "No public cams are live"}</h2><small>{favoritesOnly ? (favoriteWarnings.length ? "Check the account messages above. Existing local favorites are kept." : favorites.length ? "Try another source, search, or gender filter." : "Open a live stream and select Favorite creator to add it here, or connect your provider account in Plugins.") : "Try another source or filter. Installed providers are refreshed every 30 seconds."}</small>{result?.providers.filter((provider) => !provider.ok).map((provider) => <p key={provider.id}>{provider.name}: {provider.error}</p>)}</div>}
   </section>;
 }

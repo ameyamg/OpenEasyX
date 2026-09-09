@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { LiveCamCard, LiveCamFavoriteButton, LiveCamPerformerButton, LiveCamRecordButton, LiveCamUnavailable, LivePlayer, liveCamListUrl, liveCamPresetFromSearch, liveCamUrl, shouldRecoverNativeLiveMediaError } from "./LiveCamPage";
+import { LiveCamCard, LiveCamFavoriteButton, LiveCamPerformerButton, LiveCamRecordButton, LiveCamUnavailable, LivePlayer, liveCamListUrl, liveCamPresetFromSearch, liveCamUrl, mergeLiveCamRefresh, shouldRecoverNativeLiveMediaError } from "./LiveCamPage";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -69,5 +69,19 @@ describe("Live Cam availability", () => {
     expect(shouldRecoverNativeLiveMediaError(4, false, 9_000, 10_000)).toBe(true);
     expect(shouldRecoverNativeLiveMediaError(4, false, 1_000, 10_000)).toBe(false);
     expect(shouldRecoverNativeLiveMediaError(3, true, 0, 10_000)).toBe(false);
+  });
+
+  it("does not label a failed status lookup as offline", () => {
+    const html = renderToStaticMarkup(<LiveCamCard cam={{ id: "alice", username: "alice", pageUrl: "https://live.test/alice", providerId: "test.live", providerName: "Test Live", favorite: true, online: false, statusUnavailable: true }} open={() => {}}/>);
+    expect(html).toContain("STATUS UNAVAILABLE"); expect(html).toContain("Your favorite is saved");
+    expect(html).not.toContain("OFFLINE"); expect(html).not.toContain("Not broadcasting right now");
+  });
+
+  it("retains rooms while their provider refreshes and removes them when an empty result is complete", () => {
+    const previous = { available: true, items: [{ id: "alice", username: "alice", providerId: "test.live", providerName: "Test Live", pageUrl: "https://live.test/alice" }], total: 1, page: 1, pageSize: 24, pages: 1, providers: [{ id: "test.live", name: "Test Live", ok: true, count: 1 }], complete: true };
+    const pending = { ...previous, items: [], total: 0, providers: [{ ...previous.providers[0], count: 0, pending: true }], complete: false };
+    expect(mergeLiveCamRefresh(previous, pending)).toMatchObject({ items: previous.items, total: 1 });
+    expect(mergeLiveCamRefresh(previous, { ...pending, complete: true })).toMatchObject({ items: [], total: 0 });
+    expect(mergeLiveCamRefresh(null, pending)).toEqual(pending);
   });
 });

@@ -8,6 +8,7 @@ const FOLLOW_PAGE_SIZE = 90;
 const MAX_FOLLOWED_CAMS = 5_000;
 const verifiedAccountSessions = new Set<string>();
 let liveSearchCache: { key: string; expiresAt: number; cams: LiveCam[] } | undefined;
+let liveStatusRetryAt = 0;
 
 function text(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value.trim() : undefined; }
 function stamp(value: unknown): number | undefined { const parsed = Number(value); return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined; }
@@ -322,6 +323,29 @@ export default definePlugin({
     const cams = pages.flatMap((page) => page.cams).slice(start - base, end - base);
     const total = pages[0]?.total ?? cams.length;
     return { cams, total, page: query.page, pageSize: query.pageSize, pages: Math.max(1, Math.ceil(total / query.pageSize)) };
+  },
+  async getLiveCam(context, cam) {
+    if (!/^[a-z0-9_]+$/i.test(cam.username)) throw new Error("Invalid Chaturbate room name");
+    if (Date.now() < liveStatusRetryAt) throw new Error("Chaturbate is limiting status checks. Please try again shortly.");
+    const response = await context.fetch(`https://chaturbate.com/api/chatvideocontext/${encodeURIComponent(cam.username)}/`, {
+      headers: { accept: "application/json", referer: cam.pageUrl, "user-agent": "Mozilla/5.0" }, signal: requestSignal(context),
+    });
+    if (response.status === 429) {
+      const delay = Number(response.headers.get("retry-after"));
+      liveStatusRetryAt = Date.now() + Math.max(60, Math.min(Number.isFinite(delay) ? delay : 60, 300)) * 1000;
+    }
+    if (!response.ok) throw new Error(`Chaturbate live status returned HTTP ${response.status}`);
+    const room = await response.json() as Record<string, unknown>;
+    const status = text(room.room_status);
+    if (!status || !["public", "offline", "private", "group", "away", "hidden", "password", "notconnected"].includes(status)) throw new Error("Chaturbate did not return a valid room status");
+    const username = text(room.broadcaster_username);
+    if (username && username.toLowerCase() !== cam.username.toLowerCase()) throw new Error("Chaturbate returned a different room");
+    const online = status === "public";
+    return { ...cam, online, statusUnavailable: false, title: text(room.room_title) ?? cam.title,
+      viewers: online ? whole(room.num_viewers) ?? 0 : 0,
+      gender: text(room.broadcaster_gender) ?? cam.gender,
+      thumbnailUrl: cam.thumbnailUrl ?? `https://roomimg.stream.highwebmedia.com/ri/${encodeURIComponent(cam.username)}.jpg`,
+    };
   },
   async listFollowedLiveCams(context) { return followedSnapshot(context); },
   async setLiveCamFavorite(context, cam, favorite) { return setRemoteFavorite(context, cam, favorite); },
