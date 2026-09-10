@@ -14,6 +14,7 @@ import { deletePerformerFiles, ensurePerformerDirectory, renamePerformerDirector
 import { domainFromUrl } from "./utils.js";
 import { BrowserLoginManager } from "./browser-login.js";
 import { LogStore, type LogWriter } from "./log-store.js";
+import { LiveCamImages } from "./live-cam-images.js";
 import { LiveCamService } from "./live-cams.js";
 import { PluginRepositoryManager } from "./plugin-repositories.js";
 import { LibraryDatabase } from "./library-database.js";
@@ -41,7 +42,12 @@ const queue = new DownloadQueue(
   (item) => catalog.deleteStoredMedia(item.storagePath!),
 );
 const browserLogin = new BrowserLoginManager(dataDir);
-const liveCams = new LiveCamService(db, plugins);
+const liveCamImages = new LiveCamImages(db, plugins, path.join(dataDir, "performer-images"));
+const liveCams = new LiveCamService(db, plugins, fetch, (providerId, cam, performer) => { void liveCamImages.ensure(providerId, cam, performer); });
+for (const favorite of db.listLiveCamFavorites()) {
+  const entry = plugins.list().find((entry) => entry.manifest.id === favorite.providerId && entry.installed && entry.enabled);
+  if (entry) liveCams.createPerformer(favorite.providerId, { ...favorite, id: favorite.camId, online: false });
+}
 queue.start();
 
 const app = Fastify({ loggerInstance: appLogger, bodyLimit: 8 * 1024 * 1024 });
@@ -201,7 +207,7 @@ const liveCamBodySchema = z.object({
   providerId: z.string().trim().min(1),
   cam: z.object({
     id: z.string().trim().min(1).max(300), username: z.string().trim().min(1).max(160), title: z.string().max(300).optional(),
-    pageUrl: z.string().url().max(4096), thumbnailUrl: z.string().url().max(4096).optional(), viewers: z.number().int().min(0).optional(),
+    pageUrl: z.string().url().max(4096), thumbnailUrl: z.string().url().max(4096).optional(), profileImageUrl: z.string().url().max(4096).optional(), viewers: z.number().int().min(0).optional(),
     age: z.number().int().min(18).max(120).optional(), gender: z.string().max(40).optional(), tags: z.array(z.string().max(80)).max(50).optional(),
   }),
 });

@@ -143,6 +143,7 @@ export type LiveCam = {
   title?: string;
   pageUrl: string;
   thumbnailUrl?: string;
+  profileImageUrl?: string;
   viewers?: number;
   age?: number;
   gender?: string;

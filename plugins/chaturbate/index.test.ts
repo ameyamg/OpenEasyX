@@ -149,9 +149,9 @@ describe("Chaturbate plugin", () => {
       const context = accountContext(request);
       const cam = { id: "alice", username: "alice", pageUrl: "https://chaturbate.com/alice/" };
       await expect(chaturbate.getLiveCam!(context, cam)).rejects.toThrow("HTTP 429");
-      await expect(chaturbate.getLiveCam!(context, cam)).rejects.toThrow("limiting status checks");
+      await expect(chaturbate.getLiveCam!(context, cam)).rejects.toThrow("limiting requests");
       expect(request).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(60_001);
+      await vi.advanceTimersByTimeAsync(120_001);
       await expect(chaturbate.getLiveCam!(context, cam)).resolves.toMatchObject({ online: true });
     } finally { vi.useRealTimers(); }
   });

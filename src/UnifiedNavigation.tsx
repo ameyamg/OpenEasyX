@@ -1,10 +1,11 @@
-import { Activity, BarChart3, Heart, History, House, Library, Logs, Plug, Radio, Settings, Users } from "lucide-react";
+import { Activity, BarChart3, Heart, History, House, Library, Logs, Plug, Radio, Star, Settings, Users } from "lucide-react";
 
 const groups = [
   { label: "OPEN EASYX", items: [
     { href: "/media", label: "Home", icon: House },
     { href: "/library", label: "Library", icon: Library },
     { href: "/live-cam", label: "Live Cam", icon: Radio },
+    { href: "/live-cam/favorites", label: "Live Favorites", icon: Star },
     { href: "/favorites", label: "Favorites", icon: Heart },
     { href: "/history", label: "History", icon: History },
     { href: "/statistics", label: "Statistics", icon: BarChart3 },
@@ -21,6 +22,7 @@ const groups = [
 ] as const;
 
 function activeRoute(pathname: string, href: string) {
+  if (href === "/live-cam") return pathname === href || (pathname.startsWith(`${href}/`) && pathname !== "/live-cam/favorites");
   if (href === "/media") return pathname === "/" || pathname === "/overview" || pathname === "/media";
   if (href === "/library") return pathname.startsWith("/library") || pathname.startsWith("/watch/") || pathname.startsWith("/photos/");
   return pathname === href || pathname.startsWith(`${href}/`);

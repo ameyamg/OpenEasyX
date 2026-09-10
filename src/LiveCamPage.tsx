@@ -28,12 +28,12 @@ export function mergeLiveCamRefresh(previous: LiveCamResult | null, next: LiveCa
 }
 export type LiveCamPreset = { query?: string; providerId?: string; gender?: "female" | "male" | "couple" | "trans" | ""; favoritesOnly?: boolean; page?: number };
 
-export function liveCamPresetFromSearch(search: string): LiveCamPreset {
+export function liveCamPresetFromSearch(search: string, pathname = ""): LiveCamPreset {
   const params = new URLSearchParams(search); const gender = params.get("gender") ?? "";
   return {
     query: params.get("q") ?? "", providerId: params.get("source") ?? "",
     gender: (["female", "male", "couple", "trans"].includes(gender) ? gender : "") as LiveCamPreset["gender"],
-    favoritesOnly: params.get("favorites") === "1",
+    favoritesOnly: pathname === "/live-cam/favorites" || params.get("favorites") === "1",
     page: Math.max(1, Number(params.get("page") ?? 1) || 1),
   };
 }
@@ -41,8 +41,8 @@ export function liveCamPresetFromSearch(search: string): LiveCamPreset {
 export function liveCamListUrl(preset: LiveCamPreset = {}) {
   const params = new URLSearchParams();
   if (preset.query) params.set("q", preset.query); if (preset.providerId) params.set("source", preset.providerId);
-  if (preset.gender) params.set("gender", preset.gender); if (preset.favoritesOnly) params.set("favorites", "1"); if ((preset.page ?? 1) > 1) params.set("page", String(preset.page));
-  const query = params.toString(); return `/live-cam${query ? `?${query}` : ""}`;
+  if (preset.gender) params.set("gender", preset.gender); if ((preset.page ?? 1) > 1) params.set("page", String(preset.page));
+  const query = params.toString(); return `/live-cam${preset.favoritesOnly ? "/favorites" : ""}${query ? `?${query}` : ""}`;
 }
 
 export function liveCamUrl(cam: Pick<LiveCam, "providerId" | "id">) {
@@ -279,7 +279,7 @@ export function LiveCamPage({ preset, route, open }: { preset: LiveCamPreset; ro
   const params = useMemo(() => new URLSearchParams({ page: String(page), pageSize: "24", search, providerId, gender: gender ?? "", favoritesOnly: favoritesOnly ? "1" : "" }), [page, search, providerId, gender, favoritesOnly]);
   useEffect(() => {
     const syncFromLocation = () => {
-      const next = liveCamPresetFromSearch(window.location.search);
+      const next = liveCamPresetFromSearch(window.location.search, window.location.pathname);
       if (searchInput.current) searchInput.current.value = next.query ?? "";
       setSearch(next.query ?? ""); setProviderId(next.providerId ?? ""); setGender(next.gender ?? ""); setFavoritesOnly(Boolean(next.favoritesOnly)); setPage(next.page ?? 1);
     };
@@ -322,16 +322,16 @@ export function LiveCamPage({ preset, route, open }: { preset: LiveCamPreset; ro
   const onlineFavorites = favoritesOnly ? result?.items.filter((cam) => cam.online !== false && !cam.statusUnavailable) ?? [] : [];
   const offlineFavorites = favoritesOnly ? result?.items.filter((cam) => cam.online === false && !cam.statusUnavailable) ?? [] : [];
   const unknownFavorites = favoritesOnly ? result?.items.filter((cam) => cam.statusUnavailable) ?? [] : [];
-  const favoriteWarnings = favoritesOnly ? result?.providers.filter((provider) => (!providerId || provider.id === providerId) && (provider.warning || provider.error)) ?? [] : [];
+  const favoriteWarnings = result?.providers.filter((provider) => (!providerId || provider.id === providerId) && (provider.warning || provider.error)) ?? [];
   const camGrid = (items: LiveCam[]) => <div className="live-grid">{items.map((cam) => <LiveCamCard cam={cam} open={open} key={`${cam.providerId}:${cam.id}`}/>)}</div>;
   return <section className="live-page">
-    <div className="library-intro live-intro"><div><p>LIVE NOW</p><h2>Live Cam</h2><span>Public live rooms aggregated by your installed Open EasyX source plugins</span></div><button className="quiet" onClick={() => setRefresh((value) => value + 1)} disabled={loading}><RefreshCw className={loading ? "spin" : ""}/>Refresh</button></div>
+    <div className="library-intro live-intro"><div><p>LIVE NOW</p><h2>{favoritesOnly ? "Live Favorites" : "Live Cam"}</h2><span>{favoritesOnly ? "Your favorite creators across all live providers" : "Public live rooms aggregated by your installed Open EasyX source plugins"}</span></div><button className="quiet" onClick={() => setRefresh((value) => value + 1)} disabled={loading}><RefreshCw className={loading ? "spin" : ""}/>Refresh</button></div>
     {result?.available !== false && <div className="live-filters">
       <label><Search/><input ref={searchInput} defaultValue={search} onChange={(event) => { const value = event.currentTarget.value; window.clearTimeout(searchTimer.current); searchTimer.current = window.setTimeout(() => { setSearch(value); setPage(1); }, 300); }} placeholder="Search live cams or tags…"/></label>
       <label><Radio/><select aria-label="Filter live provider" value={providerId} onChange={(event) => reset(() => setProviderId(event.target.value))}><option value="">All live sources ({allCount.toLocaleString()}{loading ? "+" : ""})</option>{providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name} ({provider.pending ? "loading…" : provider.count.toLocaleString()})</option>)}</select></label>
       <div className="live-genders"><button className={favoritesOnly ? "active favorite" : "favorite"} onClick={() => reset(() => setFavoritesOnly((value) => !value))}><Star fill={favoritesOnly ? "currentColor" : "none"}/>Favorites</button><button className={!gender ? "active" : ""} onClick={() => reset(() => setGender(""))}>All</button>{[["female", "Women"], ["male", "Men"], ["couple", "Couples"], ["trans", "Trans"]].map(([value, label]) => <button key={value} className={gender === value ? "active" : ""} onClick={() => reset(() => setGender(value as LiveCamPreset["gender"]))}>{label}</button>)}</div>
     </div>}
-    {favoriteWarnings.length > 0 && <div className="live-provider-notices" role="status">{favoriteWarnings.map((provider) => <p key={provider.id}><b>{provider.name}:</b> {provider.warning || provider.error}</p>)}<a href="/plugins">Check account sessions in Plugins</a></div>}
+    {favoriteWarnings.length > 0 && <div className="live-provider-notices" role="status">{favoriteWarnings.map((provider) => <p key={provider.id}><b>{provider.name}:</b> {provider.warning || provider.error}</p>)}{favoriteWarnings.some((provider) => /session|login|log in|sign.?in|connect.*account/i.test(provider.warning || provider.error || "")) && <a href="/plugins">Check account sessions in Plugins</a>}</div>}
     {loading && !result ? <div className="loading"><LoaderCircle className="spin"/>Loading live cams…</div>
       : result?.available === false ? <LiveCamUnavailable reason={result.reason ?? "No live-cam provider is available in Open EasyX."}/>
       : result && !result.providers.length ? <div className="live-unavailable compact"><span><Radio/></span><h2>No live-cam plugin installed</h2><small>Install a live provider such as Chaturbate Live from Plugins. It will appear here automatically.</small></div>

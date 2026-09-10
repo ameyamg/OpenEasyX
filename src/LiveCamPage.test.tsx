@@ -30,9 +30,11 @@ describe("Live Cam availability", () => {
 
   it("creates shareable URLs for filters and individual live cams", () => {
     expect(liveCamListUrl({ query: "alice", providerId: "test.live", gender: "female", favoritesOnly: true, page: 3 }))
-      .toBe("/live-cam?q=alice&source=test.live&gender=female&favorites=1&page=3");
+      .toBe("/live-cam/favorites?q=alice&source=test.live&gender=female&page=3");
     expect(liveCamPresetFromSearch("?q=alice&source=test.live&gender=female&favorites=1&page=3"))
       .toEqual({ query: "alice", providerId: "test.live", gender: "female", favoritesOnly: true, page: 3 });
+    expect(liveCamPresetFromSearch("?source=test.live", "/live-cam/favorites")).toMatchObject({ favoritesOnly: true, providerId: "test.live" });
+    expect(liveCamListUrl({ favoritesOnly: true })).toBe("/live-cam/favorites");
     expect(liveCamUrl({ providerId: "test.live", id: "alice/bob" })).toBe("/live-cam/test.live/alice%2Fbob");
   });
 

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { chaturbateRequest } from "./request.js";
 import { createHash } from "node:crypto";
 import { definePlugin, type LiveCam, type LiveCamFavoriteSnapshot, type LiveCamPage, type MediaCandidate, type PluginContext } from "../../packages/plugin-sdk/index.js";
 import { configuredArgs, runYtDlpJson, testYtDlp, ytDlpDownload, ytDlpLiveStream } from "../yt-dlp-utils.js";
@@ -8,7 +9,6 @@ const FOLLOW_PAGE_SIZE = 90;
 const MAX_FOLLOWED_CAMS = 5_000;
 const verifiedAccountSessions = new Set<string>();
 let liveSearchCache: { key: string; expiresAt: number; cams: LiveCam[] } | undefined;
-let liveStatusRetryAt = 0;
 
 function text(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value.trim() : undefined; }
 function stamp(value: unknown): number | undefined { const parsed = Number(value); return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined; }
@@ -88,7 +88,7 @@ function strictTotal(value: unknown): number | undefined {
 async function validateAccountSession(context: PluginContext, cookies: Map<string, string>): Promise<void> {
   const fingerprint = createHash("sha256").update(cookies.get("sessionid") ?? "").digest("hex");
   if (verifiedAccountSessions.has(fingerprint)) return;
-  const validation = await context.fetch("https://chaturbate.com/api/ts/chatmessages/pm_users/?offset=0", {
+  const validation = await chaturbateRequest(context, "https://chaturbate.com/api/ts/chatmessages/pm_users/?offset=0", {
     headers: accountHeaders(cookies), redirect: "manual", signal: requestSignal(context),
   });
   if (validation.status >= 300 && validation.status < 400) throw new Error("The Chaturbate session redirected to login. Reconnect the account.");
@@ -120,7 +120,7 @@ async function followedSnapshot(context: PluginContext): Promise<LiveCamFavorite
       while (true) {
         const params = new URLSearchParams({ limit: String(FOLLOW_PAGE_SIZE), offset: String(offset), follow: "true" });
         if (offline) params.set("offline", "true");
-        const response = await context.fetch(`https://chaturbate.com/api/ts/roomlist/room-list/?${params}`, {
+        const response = await chaturbateRequest(context, `https://chaturbate.com/api/ts/roomlist/room-list/?${params}`, {
           headers: accountHeaders(cookies), redirect: "manual", signal: requestSignal(context),
         });
         if (response.status >= 300 && response.status < 400) throw new Error("The Chaturbate followed list redirected to login. Reconnect the account.");
@@ -163,7 +163,7 @@ async function followedSnapshot(context: PluginContext): Promise<LiveCamFavorite
   } catch (error) {
     const skippedReason = error instanceof Error ? error.message : String(error);
     context.log("warn", "Chaturbate favorite synchronization skipped", { reason: skippedReason });
-    return { cams: [], authoritative: false, skippedReason };
+    return { cams: [...cams.values()], authoritative: false, skippedReason };
   }
 }
 
@@ -174,14 +174,14 @@ async function setRemoteFavorite(context: PluginContext, cam: LiveCam, favorite:
   const username = cam.username;
   const roomUrl = `https://chaturbate.com/${username}/`;
   const headers = accountHeaders(cookies, roomUrl);
-  const primed = await context.fetch(roomUrl, { headers, redirect: "manual", signal: requestSignal(context) });
+  const primed = await chaturbateRequest(context, roomUrl, { headers, redirect: "manual", signal: requestSignal(context) });
   if (!primed.ok) throw new Error(`Chaturbate could not open the room (HTTP ${primed.status})`);
   const csrf = cookies.get("csrftoken");
-  const response = await context.fetch(`https://chaturbate.com/follow/${favorite ? "follow" : "unfollow"}/${username}/`, {
+  const response = await chaturbateRequest(context, `https://chaturbate.com/follow/${favorite ? "follow" : "unfollow"}/${username}/`, {
     method: "POST", headers: { ...headers, ...(csrf ? { "x-csrftoken": csrf } : {}) }, redirect: "manual", signal: requestSignal(context),
   });
   if (!response.ok) throw new Error(`Chaturbate could not ${favorite ? "follow" : "unfollow"} ${username} (HTTP ${response.status})`);
-  const verification = await context.fetch(`https://chaturbate.com/api/chatvideocontext/${username}/`, {
+  const verification = await chaturbateRequest(context, `https://chaturbate.com/api/chatvideocontext/${username}/`, {
     headers, redirect: "manual", signal: requestSignal(context),
   });
   let payload: unknown;
@@ -288,7 +288,7 @@ export default definePlugin({
       const params = new URLSearchParams({ limit: String(Math.min(100, limit)), offset: String(offset) });
       if (query.gender) params.set("genders", { female: "f", male: "m", couple: "c", trans: "t" }[query.gender]);
       if (query.search) params.set("keywords", query.search);
-      const response = await context.fetch(`https://chaturbate.com/api/ts/roomlist/room-list/?${params}`, {
+      const response = await chaturbateRequest(context, `https://chaturbate.com/api/ts/roomlist/room-list/?${params}`, {
         headers: {
           accept: "application/json", "x-requested-with": "XMLHttpRequest", referer: "https://chaturbate.com/",
           "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/136.0 Safari/537.36",
@@ -326,14 +326,9 @@ export default definePlugin({
   },
   async getLiveCam(context, cam) {
     if (!/^[a-z0-9_]+$/i.test(cam.username)) throw new Error("Invalid Chaturbate room name");
-    if (Date.now() < liveStatusRetryAt) throw new Error("Chaturbate is limiting status checks. Please try again shortly.");
-    const response = await context.fetch(`https://chaturbate.com/api/chatvideocontext/${encodeURIComponent(cam.username)}/`, {
+    const response = await chaturbateRequest(context, `https://chaturbate.com/api/chatvideocontext/${encodeURIComponent(cam.username)}/`, {
       headers: { accept: "application/json", referer: cam.pageUrl, "user-agent": "Mozilla/5.0" }, signal: requestSignal(context),
     });
-    if (response.status === 429) {
-      const delay = Number(response.headers.get("retry-after"));
-      liveStatusRetryAt = Date.now() + Math.max(60, Math.min(Number.isFinite(delay) ? delay : 60, 300)) * 1000;
-    }
     if (!response.ok) throw new Error(`Chaturbate live status returned HTTP ${response.status}`);
     const room = await response.json() as Record<string, unknown>;
     const status = text(room.room_status);
