@@ -115,6 +115,7 @@ app.delete<{ Params: { id: string } }>("/api/plugin-repositories/:id", async (re
 });
 app.post<{ Params: { id: string }; Body: Record<string, unknown> | undefined }>("/api/plugins/:id/install", async (request) => {
   plugins.install(request.params.id, request.body ?? {});
+  liveCams.resetProviderSession(request.params.id);
   refreshLiveCamFavorites(request.params.id);
   return plugins.list().find((plugin) => plugin.manifest.id === request.params.id);
 });
@@ -131,6 +132,7 @@ app.post<{ Params: { id: string }; Body: { enabled?: boolean } }>("/api/plugins/
 });
 app.put<{ Params: { id: string }; Body: Record<string, unknown> }>("/api/plugins/:id/config", async (request) => {
   plugins.configure(request.params.id, request.body ?? {});
+  liveCams.resetProviderSession(request.params.id);
   refreshLiveCamFavorites(request.params.id);
   return plugins.list().find((plugin) => plugin.manifest.id === request.params.id);
 });
@@ -170,6 +172,7 @@ app.post<{ Params: { id: string }; Body: Record<string, unknown> | undefined }>(
   }
   const installed = db.getPluginState(request.params.id).installed;
   if (installed) plugins.configure(request.params.id, incoming); else plugins.install(request.params.id, incoming);
+  liveCams.resetProviderSession(request.params.id);
   await browserLogin.removeProfile(request.params.id);
   refreshLiveCamFavorites(request.params.id);
   return { plugin: plugins.list().find((entry) => entry.manifest.id === request.params.id), test };

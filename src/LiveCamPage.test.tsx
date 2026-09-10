@@ -30,11 +30,11 @@ describe("Live Cam availability", () => {
 
   it("creates shareable URLs for filters and individual live cams", () => {
     expect(liveCamListUrl({ query: "alice", providerId: "test.live", gender: "female", favoritesOnly: true, page: 3 }))
-      .toBe("/live-cam/favorites?q=alice&source=test.live&gender=female&page=3");
+      .toBe("/live-cam?q=alice&source=test.live&gender=female&page=3&favorites=1");
     expect(liveCamPresetFromSearch("?q=alice&source=test.live&gender=female&favorites=1&page=3"))
       .toEqual({ query: "alice", providerId: "test.live", gender: "female", favoritesOnly: true, page: 3 });
     expect(liveCamPresetFromSearch("?source=test.live", "/live-cam/favorites")).toMatchObject({ favoritesOnly: true, providerId: "test.live" });
-    expect(liveCamListUrl({ favoritesOnly: true })).toBe("/live-cam/favorites");
+    expect(liveCamListUrl({ favoritesOnly: true })).toBe("/live-cam?favorites=1");
     expect(liveCamUrl({ providerId: "test.live", id: "alice/bob" })).toBe("/live-cam/test.live/alice%2Fbob");
   });
 
@@ -60,9 +60,9 @@ describe("Live Cam availability", () => {
     expect(html).toContain("Favorited"); expect(html).toContain('aria-pressed="true"');
   });
 
-  it("renders offline favorite cams separately without opening the player", () => {
+  it("keeps confirmed offline rooms disabled without diagnostic status labels", () => {
     const html = renderToStaticMarkup(<LiveCamCard cam={{ id: "alice", username: "alice", pageUrl: "https://live.test/alice", providerId: "test.live", providerName: "Test Live", favorite: true, online: false }} open={() => {}}/>);
-    expect(html).toContain("OFFLINE"); expect(html).toContain('aria-disabled="true"'); expect(html).toContain("Not broadcasting right now");
+    expect(html).not.toContain("OFFLINE"); expect(html).toContain('aria-disabled="true"');
     expect(html).not.toContain('href="/live-cam/');
   });
 
@@ -73,9 +73,10 @@ describe("Live Cam availability", () => {
     expect(shouldRecoverNativeLiveMediaError(3, true, 0, 10_000)).toBe(false);
   });
 
-  it("does not label a failed status lookup as offline", () => {
+  it("allows retrying a room whose status lookup failed without diagnostic labels", () => {
     const html = renderToStaticMarkup(<LiveCamCard cam={{ id: "alice", username: "alice", pageUrl: "https://live.test/alice", providerId: "test.live", providerName: "Test Live", favorite: true, online: false, statusUnavailable: true }} open={() => {}}/>);
-    expect(html).toContain("STATUS UNAVAILABLE"); expect(html).toContain("Your favorite is saved");
+    expect(html).not.toContain("STATUS UNAVAILABLE"); expect(html).not.toContain("Your favorite is saved");
+    expect(html).toContain('href="/live-cam/test.live/alice"');
     expect(html).not.toContain("OFFLINE"); expect(html).not.toContain("Not broadcasting right now");
   });
 

@@ -225,7 +225,7 @@ export function LibraryApp() {
     }).catch(() => { if (!cancelled) { setNotice("This media is no longer available."); navigate("/library", { replace: true }); } });
     return () => { cancelled = true; };
   }, [routeMedia?.id]);
-  const pageTitle = page === "live-cam" && liveCamPreset.favoritesOnly ? "Live Favorites" : nav.find(([key]) => key === page)?.[1] ?? "Home";
+  const pageTitle = nav.find(([key]) => key === page)?.[1] ?? "Home";
   useEffect(() => { document.title = selected ? `${selected.media.title} · Open EasyX` : `${pageTitle} · Open EasyX`; }, [pageTitle, selected?.media.id, routeLiveCam?.camId]);
 
   if (!dashboard) return <div className="boot"><span className="logo">EX</span><LoaderCircle className="spin"/><p>Opening your private library…</p></div>;

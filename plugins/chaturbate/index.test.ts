@@ -88,6 +88,16 @@ describe("Chaturbate plugin", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("checks a previously verified session again when the user tests the connection", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response("{}", { status: 200 }))
+      .mockResolvedValueOnce(new Response("", { status: 302, headers: { location: "/auth/login/" } }));
+    const context = accountContext(fetchMock, ".chaturbate.com\tTRUE\t/\tTRUE\t0\tsessionid\tpreviously-valid-session");
+    context.runCommand = vi.fn(async () => ({ exitCode: 0, stdout: "2026.08.19\n", stderr: "" }));
+    expect(await chaturbate.testConnection!(context)).toMatchObject({ ok: true });
+    expect(await chaturbate.testConnection!(context)).toMatchObject({ ok: false, message: expect.stringContaining("redirected to login") });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("refuses to replace favorites when Chaturbate ignores the followed-only filter", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ rooms: [{ username: "public_model", is_following: false }], total_count: 1 }), { status: 200 }));
     await expect(chaturbate.listFollowedLiveCams!(accountContext(fetchMock as typeof fetch))).resolves.toMatchObject({

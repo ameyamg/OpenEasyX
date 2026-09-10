@@ -24,6 +24,35 @@ async function fixture() {
 }
 
 describe("Open EasyX live cams", () => {
+  it("uses the reconnected account immediately instead of its cached login failure", async () => {
+    const { plugins, service } = await fixture(); plugins.install("test.live");
+    const followed = vi.fn().mockResolvedValueOnce({ authoritative: false, cams: [], skippedReason: "Session expired" })
+      .mockResolvedValue({ authoritative: true, cams: [{ id: "alice", username: "alice", pageUrl: "https://live.test/alice", online: true }] });
+    plugins.get("test.live").listFollowedLiveCams = followed;
+    const query = { page: 1, pageSize: 24, favoritesOnly: true };
+    expect((await service.list(query)).items).toHaveLength(0);
+    service.resetProviderSession("test.live");
+    expect(await service.syncFavorites("test.live")).toMatchObject({ authoritative: true, added: 1 });
+    expect((await service.list(query)).items).toMatchObject([{ username: "alice", online: true }]);
+    expect(followed).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let an old in-flight account read overwrite a reconnected session", async () => {
+    const { plugins, service } = await fixture(); plugins.install("test.live");
+    let finishOld!: (value: { authoritative: boolean; cams: []; skippedReason: string }) => void;
+    let started!: () => void;
+    const oldStarted = new Promise<void>((resolve) => { started = resolve; });
+    const followed = vi.fn().mockImplementationOnce(() => { started(); return new Promise((resolve) => { finishOld = resolve; }); })
+      .mockResolvedValue({ authoritative: true, cams: [{ id: "alice", username: "alice", pageUrl: "https://live.test/alice", online: true }] });
+    plugins.get("test.live").listFollowedLiveCams = followed;
+    const oldSync = service.syncFavorites("test.live"); await oldStarted;
+    service.resetProviderSession("test.live");
+    expect(await service.syncFavorites("test.live")).toMatchObject({ authoritative: true });
+    finishOld({ authoritative: false, cams: [], skippedReason: "Old session expired" }); await oldSync;
+    expect((await service.list({ page: 1, pageSize: 24, favoritesOnly: true })).items).toMatchObject([{ username: "alice", online: true }]);
+    expect(followed).toHaveBeenCalledTimes(2);
+  });
+
   it("shares account reads across concurrent refreshes and scheduled synchronization", async () => {
     const { plugins, service } = await fixture(); plugins.install("test.live");
     const followed = vi.fn(async () => ({ authoritative: true, cams: [{ id: "alice", username: "alice", pageUrl: "https://live.test/alice", online: true }] }));

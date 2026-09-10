@@ -17,10 +17,10 @@ describe("UnifiedNavigation", () => {
     expect(html).not.toContain("Workspace");
   });
 
-  it("keeps live favorites separate from media favorites and the live directory", () => {
+  it("keeps the favorites filter inside the Live Cam navigation entry", () => {
     const html = renderToStaticMarkup(<UnifiedNavigation pathname="/live-cam/favorites"/>);
-    expect(html).toContain('href="/live-cam/favorites" class="active"');
-    expect(html).not.toContain('href="/live-cam" class="active"');
+    expect(html).not.toContain('href="/live-cam/favorites"');
+    expect(html).toContain('href="/live-cam" class="active"');
     expect(html).not.toContain('href="/favorites" class="active"');
   });
 

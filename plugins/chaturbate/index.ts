@@ -85,8 +85,9 @@ function strictTotal(value: unknown): number | undefined {
   return undefined;
 }
 
-async function validateAccountSession(context: PluginContext, cookies: Map<string, string>): Promise<void> {
+async function validateAccountSession(context: PluginContext, cookies: Map<string, string>, force = false): Promise<void> {
   const fingerprint = createHash("sha256").update(cookies.get("sessionid") ?? "").digest("hex");
+  if (force) verifiedAccountSessions.delete(fingerprint);
   if (verifiedAccountSessions.has(fingerprint)) return;
   const validation = await chaturbateRequest(context, "https://chaturbate.com/api/ts/chatmessages/pm_users/?offset=0", {
     headers: accountHeaders(cookies), redirect: "manual", signal: requestSignal(context),
@@ -265,7 +266,7 @@ export default definePlugin({
     try {
       const cookies = accountCookies(context.config);
       if (!cookies) return { ok: false, message: "Connect a Chaturbate account in the integrated browser." };
-      await validateAccountSession(context, cookies);
+      await validateAccountSession(context, cookies, true);
       return { ok: true, message: `${extractor.message} Chaturbate account session verified.` };
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) };

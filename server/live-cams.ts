@@ -40,6 +40,19 @@ export class LiveCamService {
 
   constructor(private readonly db: Database, private readonly plugins: PluginManager, private readonly request: typeof fetch = fetch, private readonly saveImage?: (providerId: string, cam: LiveCam, performer: Performer) => void) {}
 
+  resetProviderSession(providerId: string): void {
+    // A newly captured session must not reuse failures or account reads from the old one.
+    this.favoriteEpoch.set(providerId, (this.favoriteEpoch.get(providerId) ?? 0) + 1);
+    this.favoriteSnapshots.delete(providerId);
+    this.snapshotLoads.delete(providerId);
+    this.favoriteSyncs.delete(providerId);
+    for (const key of this.providerResults.keys()) if (JSON.parse(key)[0] === providerId) this.providerResults.delete(key);
+    for (const key of this.providerLoads.keys()) if (JSON.parse(key)[0] === providerId) this.providerLoads.delete(key);
+    for (const cache of [this.favoriteStatuses, this.recentCams]) {
+      for (const key of cache.keys()) if (key.startsWith(`${providerId}:`)) cache.delete(key);
+    }
+  }
+
   private findPerformer(providerId: string, cam: Pick<LiveCam, "id" | "username">, performers = this.db.listPerformers()): Performer | undefined {
     const identities = new Set([cam.username, cam.id, `live:${cam.username}`].map((value) => value.trim().toLowerCase()));
     return performers.find((performer) => {
@@ -80,7 +93,7 @@ export class LiveCamService {
         this.favoriteSnapshots.set(providerId, { snapshot, expiresAt: Date.now() + (snapshot.authoritative ? 60_000 : 120_000) });
       }
       return snapshot;
-    })().finally(() => this.snapshotLoads.delete(providerId));
+    })().finally(() => { if (this.snapshotLoads.get(providerId) === operation) this.snapshotLoads.delete(providerId); });
     this.snapshotLoads.set(providerId, operation);
     return operation;
   }
@@ -103,13 +116,14 @@ export class LiveCamService {
       // Keep search/filter caches bounded in long-running installations.
       if (this.providerResults.size > 200) this.providerResults.delete(this.providerResults.keys().next().value!);
       return result;
-    }).finally(() => this.providerLoads.delete(key));
+    }).finally(() => { if (this.providerLoads.get(key) === operation) this.providerLoads.delete(key); });
     this.providerLoads.set(key, operation);
     return operation;
   }
 
   private async loadProvider(entry: ReturnType<PluginManager["list"]>[number], query: LiveCamQuery, signal?: AbortSignal, favoritesOnly = false): Promise<ProviderResult> {
     const plugin = this.plugins.get(entry.manifest.id);
+    const epoch = this.favoriteEpoch.get(entry.manifest.id);
     try {
       let cams: LiveCam[] = [];
       let total = 0;
@@ -118,7 +132,6 @@ export class LiveCamService {
         if (favoritesOnly) {
           let favorites: LiveCam[];
           if (plugin.listFollowedLiveCams) {
-            const epoch = this.favoriteEpoch.get(entry.manifest.id);
             const snapshot = await this.followedSnapshot(entry.manifest.id);
             if (!snapshot.authoritative) warning = snapshot.skippedReason ?? "Account favorites could not be synchronized. Local favorites are still saved.";
             if (snapshot.authoritative && epoch === this.favoriteEpoch.get(entry.manifest.id)) this.reconcileFavorites(entry.manifest.id, snapshot.cams);
@@ -151,13 +164,13 @@ export class LiveCamService {
                     const match = result.cams.find((cam) => cam.username.toLowerCase() === saved.username.toLowerCase() || cam.id.toLowerCase() === saved.camId.toLowerCase());
                     cam = match ? { ...match, online: match.online !== false } : offline;
                   }
-                  this.favoriteStatuses.set(key, { cam, expiresAt: Date.now() + (plugin.getLiveCam ? 60_000 : 30_000) });
+                  if (epoch === this.favoriteEpoch.get(entry.manifest.id)) this.favoriteStatuses.set(key, { cam, expiresAt: Date.now() + (plugin.getLiveCam ? 60_000 : 30_000) });
                   return cam;
                 } catch (error) {
                   warning ??= error instanceof Error ? error.message : String(error);
                   const recent = this.recentCams.get(key);
                   const cam = { ...(recent?.cam ?? offline), statusUnavailable: true };
-                  if (!signal?.aborted) this.favoriteStatuses.set(key, { cam, expiresAt: Date.now() + 60_000 });
+                  if (!signal?.aborted && epoch === this.favoriteEpoch.get(entry.manifest.id)) this.favoriteStatuses.set(key, { cam, expiresAt: Date.now() + 60_000 });
                   return cam;
                 }
               }));
@@ -217,7 +230,7 @@ export class LiveCamService {
       const normalized = cams.filter((cam) => pluginMatchesSource(entry.manifest, cam.pageUrl))
         .map((cam) => this.linkPerformer({ ...cam, providerId: entry.manifest.id, providerName: entry.manifest.name, favorite: this.db.isLiveCamFavorite(entry.manifest.id, cam.username) }, performers));
       // A rendered favorite may itself come from a cache or an offline placeholder.
-      if (!favoritesOnly) for (const cam of normalized) this.recentCams.set(`${entry.manifest.id}:${cam.id.toLowerCase()}`, { cam, expiresAt: Date.now() + 120_000 });
+      if (!favoritesOnly && epoch === this.favoriteEpoch.get(entry.manifest.id)) for (const cam of normalized) this.recentCams.set(`${entry.manifest.id}:${cam.id.toLowerCase()}`, { cam, expiresAt: Date.now() + 120_000 });
       return {
         items: normalized,
         total,
@@ -358,7 +371,7 @@ export class LiveCamService {
   async syncFavorites(providerId: string): Promise<LiveCamFavoriteSyncResult> {
     const current = this.favoriteSyncs.get(providerId);
     if (current) return current;
-    const operation = this.performFavoriteSync(providerId).finally(() => this.favoriteSyncs.delete(providerId));
+    const operation = this.performFavoriteSync(providerId).finally(() => { if (this.favoriteSyncs.get(providerId) === operation) this.favoriteSyncs.delete(providerId); });
     this.favoriteSyncs.set(providerId, operation);
     return operation;
   }
