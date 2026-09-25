@@ -59,6 +59,9 @@ export function shouldRecoverNativeLiveMediaError(code: number | undefined, hidd
 }
 
 export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) {
+  // Catalogue refreshes replace cam objects even when the broadcast is unchanged.
+  // Only a different room (or an explicit retry) should replace the active stream.
+  const streamCam = useMemo(() => ({ id: cam.id, username: cam.username, pageUrl: cam.pageUrl, providerId: cam.providerId }), [cam.providerId, cam.id, cam.username, cam.pageUrl]);
   const video = useRef<HTMLVideoElement>(null); const player = useRef<HTMLDivElement>(null); const hideTimer = useRef<number | undefined>(undefined);
   const initialAudio = useRef(loadPlayerAudio(undefined, { volume: 1, muted: true }));
   const [streamUrl, setStreamUrl] = useState(""); const [error, setError] = useState(""); const [retry, setRetry] = useState(0);
@@ -94,11 +97,11 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
   }, [close, fullscreen, pageFullscreen]);
   useEffect(() => {
     let active = true; setStreamUrl(""); setError(""); setWaiting(true);
-    void api<{ streamUrl: string }>("/api/live-cams/stream", { method: "POST", body: JSON.stringify({ providerId: cam.providerId, cam }) })
+    void api<{ streamUrl: string }>("/api/live-cams/stream", { method: "POST", body: JSON.stringify({ providerId: streamCam.providerId, cam: streamCam }) })
       .then((result) => { if (active) setStreamUrl(result.streamUrl); })
       .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : String(reason)); });
     return () => { active = false; };
-  }, [cam, retry]);
+  }, [streamCam, retry]);
   useEffect(() => {
     const element = video.current; if (!element || !streamUrl) return;
     let hls: HlsInstance | undefined; let active = true; let nativeHls = false; let wasPlayingBeforeHidden = false; let needsNativeRecovery = false; let recoveryQueued = false; let foregroundedAt = 0;

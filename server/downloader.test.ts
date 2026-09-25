@@ -9,6 +9,7 @@ import { PluginManager } from "./plugin-manager.js";
 import { DownloadQueue } from "./downloader.js";
 import { Catalog } from "./catalog.js";
 import { LibraryDatabase } from "./library-database.js";
+import { LiveCamService } from "./live-cams.js";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
@@ -19,6 +20,43 @@ async function waitFor(check: () => boolean) {
 }
 
 describe("DownloadQueue", () => {
+  it("keeps recording while live directories, favorites, stream URLs and source metadata refresh", async () => {
+    const dataDir = temp("easyx-refresh-data"); const mediaDir = temp("easyx-refresh-media"); const pluginDir = temp("easyx-refresh-plugins");
+    const packageDir = path.join(pluginDir, "test"); fs.mkdirSync(packageDir);
+    const recorder = "const fs=require('node:fs'),file=process.argv[1];fs.writeFileSync(file,'start');const timer=setInterval(()=>fs.appendFileSync(file,'x'),25);process.on('SIGINT',()=>{clearInterval(timer);process.exit(0)})";
+    fs.writeFileSync(path.join(packageDir, "index.mjs"), `export default {
+      manifest: { id: "test.refresh", name: "Refresh", version: "1", description: "Test", author: "Test", capabilities: ["live-cam", "download-resolver"], sourceUrlPatterns: ["https://live.test/*"] },
+      listLiveCams: async () => ({ cams: [{ id: "alice", username: "alice", pageUrl: "https://live.test/alice" }], total: 1, page: 1, pageSize: 24, pages: 1 }),
+      listFollowedLiveCams: async () => ({ authoritative: true, cams: [{ id: "alice", username: "alice", pageUrl: "https://live.test/alice", online: true }] }),
+      resolveLiveStream: async () => ({ url: "https://cdn.test/live.m3u8" }),
+      resolveDownload: async () => ({ kind: "command", command: process.execPath, args: ["-e", ${JSON.stringify(recorder)}, "{output}"], filename: "recording.mp4" })
+    };`);
+    const db = new Database(dataDir); const manager = new PluginManager(db, [pluginDir]); await manager.load(); manager.install("test.refresh");
+    const service = new LiveCamService(db, manager);
+    const cam = { id: "alice", username: "alice", pageUrl: "https://live.test/alice" };
+    const { itemId } = service.record("test.refresh", cam);
+    const queue = new DownloadQueue(db, manager, mediaDir); queue.start();
+    try {
+      const staged = path.join(mediaDir, ".downloads", itemId, "recording.mp4");
+      await waitFor(() => fs.existsSync(staged) && fs.statSync(staged).size > 5);
+      for (let i = 0; i < 3; i++) {
+        const before = fs.statSync(staged).size;
+        const controller = new AbortController();
+        for await (const _result of service.stream({ page: 1, pageSize: 24 }, controller.signal)) controller.abort();
+        service.resetProviderSession("test.refresh");
+        await service.list({ page: 1, pageSize: 24 });
+        await service.syncFavorites("test.refresh");
+        await service.resolve("test.refresh", cam);
+        expect(db.getItem(itemId)?.status).toBe("downloading");
+        await waitFor(() => fs.statSync(staged).size > before);
+      }
+      expect(db.listItems()).toHaveLength(1);
+      queue.stopRecording(itemId);
+      await waitFor(() => db.getItem(itemId)?.status === "completed");
+      expect(fs.statSync(path.join(mediaDir, db.getItem(itemId)!.storagePath!)).size).toBeGreaterThan(5);
+    } finally { queue.stop(); db.close(); }
+  });
+
   it("keeps an active download under media/.downloads until it is complete", async () => {
     const dataDir = temp("easyx-staging-data"); const mediaDir = temp("easyx-staging-media"); const pluginDir = temp("easyx-staging-plugins");
     let finishResponse: (() => void) | undefined;

@@ -45,6 +45,14 @@ Active transfers stay below `/media/.downloads` and are never exposed to the lib
 
 Live creator favorites are saved locally immediately. Connected-provider synchronization runs in the background with a visible status, and pending changes survive restarts and retry during account synchronization. A provider outage or expired login does not discard a saved local favorite.
 
+## Chaturbate recording quality and connectivity
+
+In **Plugins → Chaturbate Live**, set **Maximum recording height** to `720` (or `480`, `1080`) to capture a native stream at or below that resolution. `0` selects the best available quality. Separate audio and video tracks are captured together with FFmpeg. If the provider has no matching resolution with audio, the recording fails instead of silently selecting a larger stream.
+
+To avoid re-encoding, keep **Settings → Live recording preset** on **Original stream — no re-encoding**. The **H.264 — smaller files** preset still performs a CPU-intensive conversion after capture; it is independent of the plugin's native resolution limit. New plugin settings apply to recordings started afterward.
+
+Chaturbate stream extraction uses IPv4 by default to avoid unreachable IPv6 routes in containers. The **Use IPv4 for stream extraction** setting can be disabled on networks requiring IPv6. It applies to yt-dlp's metadata and playlist requests; FFmpeg makes its own connections while capturing. If errors persist, check connectivity from the Open EasyX container and the recording error in Activity.
+
 ## Local development
 
 Requirements: Node.js 22.5 or newer, Git, FFmpeg, and the downloader helpers used by the plugins you enable.
@@ -71,6 +79,8 @@ Plugins are grouped in the UI by what they add:
 The official store lives in `plugins/` and cannot be removed. In **Plugins → Repositories**, an administrator can install another Git repository URL. Open EasyX validates and clones it into `/data/plugin-repositories`, loads plugins from either its root or `plugins/`, and lets the administrator update or remove that repository later.
 
 See [docs/PLUGINS.md](docs/PLUGINS.md) for the SDK contract, or start a store from the public [Open EasyX Community Plugins template](https://github.com/raccommode/OpenEasyX-Community-Plugins).
+
+For JavLibrary, see [Connect FlareSolverr](docs/FLARESOLVERR.md) for an existing instance, the optional Docker Compose service, and connectivity checks.
 
 ## Persistent paths
 
