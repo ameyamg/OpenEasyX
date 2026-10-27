@@ -69,6 +69,46 @@ export type CastState = {
   seek: (seconds: number) => void;
 };
 
+type RemoteSnapshot = { time: number; duration: number; paused: boolean; device: string };
+
+/** Observe only this video's session, and release SDK listeners when its viewer leaves. */
+export function observeCastPlayer(framework: any, context: any, url: string, callbacks: {
+  update: (snapshot: RemoteSnapshot | undefined) => void;
+  pauseLocal: () => void;
+  resumeLocal: (seconds: number, playing: boolean) => void;
+}) {
+  const player = new framework.RemotePlayer();
+  const controller = new framework.RemotePlayerController(player);
+  let last: RemoteSnapshot | undefined;
+  let disposed = false;
+  const update = () => {
+    if (disposed) return;
+    if (!player.isConnected) {
+      if (last) {
+        const previous = last; last = undefined;
+        callbacks.update(undefined);
+        callbacks.resumeLocal(previous.time, !previous.paused);
+      }
+      return;
+    }
+    if (!player.isMediaLoaded) return;
+    const session = context.getCurrentSession();
+    if (session?.getMediaSession()?.media?.contentId !== url) {
+      if (last) { last = undefined; callbacks.update(undefined); }
+      return;
+    }
+    if (!last) callbacks.pauseLocal();
+    last = { time: player.currentTime, duration: player.duration, paused: player.isPaused, device: session.getCastDevice()?.friendlyName ?? "TV" };
+    callbacks.update(last);
+  };
+  controller.addEventListener(framework.RemotePlayerEventType.ANY_CHANGE, update);
+  update(); // Also synchronize an already connected session after reopening the viewer.
+  return { player, controller, dispose: () => {
+    disposed = true;
+    controller.removeEventListener(framework.RemotePlayerEventType.ANY_CHANGE, update);
+  } };
+}
+
 export function usePlayerCast(video: RefObject<HTMLVideoElement | null>, media: CastMedia, notice: (message: string) => void, resumeLocal: (seconds: number, playing: boolean) => void): CastState {
   const [chromecast, setChromecast] = useState(false);
   const [airplay, setAirplay] = useState(false);
@@ -77,8 +117,6 @@ export function usePlayerCast(video: RefObject<HTMLVideoElement | null>, media: 
   const [device, setDevice] = useState("");
   const [remoteTime, setRemoteTime] = useState(0); const [remoteDuration, setRemoteDuration] = useState(0); const [remotePaused, setRemotePaused] = useState(true);
   const remote = useRef<{ player: any; controller: any } | undefined>(undefined);
-  const last = useRef({ time: 0, paused: true });
-  const castingNow = useRef(false);
   const resume = useRef(resumeLocal); resume.current = resumeLocal;
 
   // Chromecast: load the SDK once on a page where it can work.
@@ -86,6 +124,8 @@ export function usePlayerCast(video: RefObject<HTMLVideoElement | null>, media: 
     const win = window as CastWindow;
     if (!chromecastSupported(win)) return;
     let active = true;
+    let dispose: (() => void) | undefined;
+    setCasting(false);
     void loadCastSdk(win).then((ready) => {
       if (!ready || !active) return;
       const framework = win.cast.framework; const chrome = win.chrome;
@@ -94,23 +134,24 @@ export function usePlayerCast(video: RefObject<HTMLVideoElement | null>, media: 
       const update = () => setChromecast(context.getCastState() !== framework.CastState.NO_DEVICES_AVAILABLE);
       update();
       context.addEventListener(framework.CastContextEventType.CAST_STATE_CHANGED, update);
-      const player = new framework.RemotePlayer(); const controller = new framework.RemotePlayerController(player);
-      remote.current = { player, controller };
-      controller.addEventListener(framework.RemotePlayerEventType.ANY_CHANGE, () => {
-        if (!player.isConnected || !player.isMediaLoaded) {
-          if (player.isConnected || !castingNow.current) return;
-          // The session ended: continue locally where the TV stopped.
-          castingNow.current = false; setCasting(false);
-          resume.current(last.current.time, !last.current.paused);
-          return;
-        }
-        last.current = { time: player.currentTime, paused: player.isPaused };
-        castingNow.current = true; setCasting(true); setRemoteTime(player.currentTime); setRemoteDuration(player.duration); setRemotePaused(player.isPaused);
-        setDevice(context.getCurrentSession()?.getCastDevice()?.friendlyName ?? "TV");
+      const binding = observeCastPlayer(framework, context, receiverUrl(media.streamUrl), {
+        pauseLocal: () => video.current?.pause(),
+        resumeLocal: (seconds, playing) => resume.current(seconds, playing),
+        update: (snapshot) => {
+          setCasting(Boolean(snapshot));
+          if (!snapshot) return;
+          setRemoteTime(snapshot.time); setRemoteDuration(snapshot.duration); setRemotePaused(snapshot.paused); setDevice(snapshot.device);
+        },
       });
+      remote.current = binding;
+      dispose = () => {
+        context.removeEventListener(framework.CastContextEventType.CAST_STATE_CHANGED, update);
+        binding.dispose();
+        if (remote.current === binding) remote.current = undefined;
+      };
     });
-    return () => { active = false; };
-  }, []);
+    return () => { active = false; dispose?.(); };
+  }, [media.streamUrl]);
 
   // AirPlay (Safari) and the Remote Playback API work on the <video> element itself.
   useEffect(() => {
@@ -119,25 +160,32 @@ export function usePlayerCast(video: RefObject<HTMLVideoElement | null>, media: 
     const onAirplay = (event: Event) => setAirplay((event as Event & { availability?: string }).availability === "available");
     if (win.WebKitPlaybackTargetAvailabilityEvent) element.addEventListener("webkitplaybacktargetavailabilitychanged", onAirplay);
     let watchId: number | undefined;
+    let active = true;
     if (element.remote && !win.WebKitPlaybackTargetAvailabilityEvent) {
-      element.remote.watchAvailability((available) => setRemotePlayback(available)).then((id) => { watchId = id; }).catch(() => setRemotePlayback(false));
+      element.remote.watchAvailability((available) => { if (active) setRemotePlayback(available); }).then((id) => {
+        if (active) watchId = id;
+        else void element.remote?.cancelWatchAvailability(id).catch(() => {});
+      }).catch(() => { if (active) setRemotePlayback(false); });
     }
     return () => {
+      active = false;
       element.removeEventListener("webkitplaybacktargetavailabilitychanged", onAirplay);
       if (watchId !== undefined) void element.remote?.cancelWatchAvailability(watchId).catch(() => {});
     };
-  }, [video.current]);
+  }, [media.streamUrl]);
 
   const start = async (localTime: number) => {
     const win = window as CastWindow;
     const element = video.current as RemoteVideo | null;
     if (chromecast && remote.current) {
+      const binding = remote.current;
       const url = receiverUrl(media.streamUrl);
       if (unreachableFromTv(url)) { notice("The TV cannot reach this page's address (localhost). Open Open EasyX by the NAS address to cast."); return; }
       const framework = win.cast.framework; const chrome = win.chrome;
       const context = framework.CastContext.getInstance();
       try { await context.requestSession(); }
       catch (error) { if (String(error) !== "cancel") notice("No cast session could be started."); return; }
+      if (remote.current !== binding || video.current !== element) return;
       const session = context.getCurrentSession(); if (!session) return;
       const info = new chrome.cast.media.MediaInfo(url, media.mimeType || "video/mp4");
       info.streamType = chrome.cast.media.StreamType.BUFFERED;
@@ -147,8 +195,7 @@ export function usePlayerCast(video: RefObject<HTMLVideoElement | null>, media: 
       if (media.thumbnailUrl) info.metadata.images = [new chrome.cast.Image(receiverUrl(media.thumbnailUrl))];
       const request = new chrome.cast.media.LoadRequest(info);
       request.currentTime = localTime; request.autoplay = true;
-      element?.pause();
-      try { await session.loadMedia(request); }
+      try { await session.loadMedia(request); if (remote.current === binding && video.current === element) element?.pause(); }
       catch { notice("The TV could not play this file. Chromecast plays MP4 (H.264/AAC) and WebM; other formats need a re-encoding preset."); }
       return;
     }

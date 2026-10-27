@@ -135,7 +135,12 @@ export function createPlayerGestures(options: GestureOptions) {
     if (!pointers.size) endHold();
   }
 
-  function dispose() { cancelHold(); cancelTap(); pointers.clear(); if (holding) { holding = false; actions.holdEnd(); } }
+  function dispose() {
+    endHold(); cancelTap(); pointers.clear(); lastTap = undefined;
+    if (pinch) { pinch = undefined; actions.pinchEnd(); }
+    if (panning) { panning = false; actions.panEnd(); }
+    moved = false; consumed = false;
+  }
 
   return { down, move, up, cancel, dispose };
 }

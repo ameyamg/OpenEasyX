@@ -104,6 +104,24 @@ describe("player touch gestures", () => {
     gestures.down(at(330)); wait(500); gestures.cancel(at(330));
     expect(actions.holdEnd).toHaveBeenCalledOnce();
   });
+
+  it("ends an active speed hold when switching media", () => {
+    vi.useFakeTimers();
+    const { actions, gestures, at, wait } = setup();
+    gestures.down(at(330)); wait(500); gestures.dispose(); gestures.dispose();
+    expect(actions.holdStart).toHaveBeenCalledOnce();
+    expect(actions.holdEnd).toHaveBeenCalledOnce();
+    wait(400);
+    expect(actions.tap).not.toHaveBeenCalled();
+  });
+
+  it("clears pending taps and double-tap streaks between media", () => {
+    vi.useFakeTimers();
+    const { actions, gestures, tap, wait } = setup();
+    tap(330); wait(100); gestures.dispose(); tap(330); wait(400);
+    expect(actions.tap).toHaveBeenCalledExactlyOnceWith("touch");
+    expect(actions.doubleTap).not.toHaveBeenCalled();
+  });
 });
 
 describe("pinch zoom maths", () => {
