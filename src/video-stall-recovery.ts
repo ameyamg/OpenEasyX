@@ -75,10 +75,14 @@ export function monitorVideoStalls(element: HTMLVideoElement, options: {
   let lastPlaybackAt = performance.now();
   const hasFrameCallback = typeof element.requestVideoFrameCallback === "function";
   const hasFrameCounter = previousDecodedFrames !== undefined;
+  let lastPresentedMediaTime: number | undefined;
 
   const frame = (now: number, metadata: VideoFrameCallbackMetadata) => {
     if (!active) return;
-    noteRenderedVideoFrame(state, now, metadata.mediaTime);
+    if (lastPresentedMediaTime === undefined || Math.abs(metadata.mediaTime - lastPresentedMediaTime) > 0.001) {
+      noteRenderedVideoFrame(state, now, metadata.mediaTime);
+      lastPresentedMediaTime = metadata.mediaTime;
+    }
     frameRequest = element.requestVideoFrameCallback(frame);
   };
   if (hasFrameCallback) frameRequest = element.requestVideoFrameCallback(frame);
@@ -108,11 +112,13 @@ export function monitorVideoStalls(element: HTMLVideoElement, options: {
     if (!element.seeking && Math.abs(element.currentTime - lastPlaybackTime) > 0.01) lastPlaybackAt = now;
     lastPlaybackTime = element.currentTime;
     const liveStalled = options.live
-      && now - (hasFrameCallback || hasFrameCounter ? state.lastFrameAt : lastPlaybackAt) >= LIVE_STALL_THRESHOLD_MS
+      && now - Math.max(state.lastFrameAt, lastPlaybackAt) >= LIVE_STALL_THRESHOLD_MS
       && now - state.lastRecoveryAt >= VIDEO_STALL_RECOVERY_COOLDOWN_MS;
     // Check one final time after the retry budget, so a persistent black screen
     // becomes an actionable error rather than silently abandoning recovery.
-    const decoderStalled = (hasFrameCallback || hasFrameCounter) && shouldRecoverVideoStall({ ...state, consecutiveRecoveries: 0 }, {
+    // Safari can suppress compositor callbacks in an occluded window while its
+    // playback clock continues normally. A missing callback alone is then unreliable.
+    const decoderStalled = (hasFrameCallback || hasFrameCounter) && document.hasFocus() && shouldRecoverVideoStall({ ...state, consecutiveRecoveries: 0 }, {
       now, currentTime: element.currentTime, duration: element.duration,
       paused: element.paused, ended: element.ended, seeking: element.seeking,
       readyState: element.readyState, hidden: document.hidden,

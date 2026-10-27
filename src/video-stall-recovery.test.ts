@@ -49,7 +49,7 @@ describe("video stall monitor", () => {
     frameCallback = undefined;
     renderedFrame = undefined;
     vi.spyOn(performance, "now").mockImplementation(() => now);
-    vi.stubGlobal("document", Object.assign(new EventTarget(), { hidden: false }));
+    vi.stubGlobal("document", Object.assign(new EventTarget(), { hidden: false, hasFocus: vi.fn(() => true) }));
     vi.stubGlobal("window", {
       setInterval, clearInterval,
       requestAnimationFrame: vi.fn((callback) => { frameCallback = callback; return 42; }),
@@ -165,6 +165,26 @@ describe("video stall monitor", () => {
       await tick(time, 2);
     }
     expect(reload).not.toHaveBeenCalled();
+  });
+
+  it("does not reload a healthy live when Safari stops presenting frames in an inactive window", async () => {
+    vi.mocked(document.hasFocus).mockReturnValue(false);
+    const reload = vi.fn();
+    cleanup = monitorVideoStalls(element, { live: true, reload });
+    for (let time = 1000; time <= 30000; time += 1000) await tick(time, time / 1000);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it("detects a frozen live even when Safari keeps reporting the same presented frame", async () => {
+    const reload = vi.fn();
+    Object.assign(element, { readyState: 2 });
+    cleanup = monitorVideoStalls(element, { live: true, reload });
+    renderedFrame?.(0, { mediaTime: 2 } as VideoFrameCallbackMetadata);
+    for (let time = 1000; time <= 12000; time += 1000) {
+      renderedFrame?.(time, { mediaTime: 2 } as VideoFrameCallbackMetadata);
+      await tick(time, 2);
+    }
+    expect(reload).toHaveBeenCalledExactlyOnceWith(1);
   });
 
   it("leaves healthy live playback alone when only the playback clock is available", async () => {

@@ -70,7 +70,17 @@ describe("Live Cam availability", () => {
     expect(shouldRecoverNativeLiveMediaError(4, true, 0, 10_000)).toBe(true);
     expect(shouldRecoverNativeLiveMediaError(4, false, 9_000, 10_000)).toBe(true);
     expect(shouldRecoverNativeLiveMediaError(4, false, 1_000, 10_000)).toBe(false);
-    expect(shouldRecoverNativeLiveMediaError(3, true, 0, 10_000)).toBe(false);
+    expect(shouldRecoverNativeLiveMediaError(1, true, 0, 10_000)).toBe(false);
+  });
+
+  it.each([2, 3])("reopens the native live stream after Safari network/decode error %s while visible", (code) => {
+    expect(shouldRecoverNativeLiveMediaError(code, false, 0, 10_000)).toBe(true);
+    expect(shouldRecoverNativeLiveMediaError(code, true, 0, 10_000)).toBe(true);
+  });
+
+  it.each([2, 3, 4])("does not automatically resume a manually paused live after media error %s", (code) => {
+    expect(shouldRecoverNativeLiveMediaError(code, false, 9_000, 10_000, false)).toBe(false);
+    expect(shouldRecoverNativeLiveMediaError(code, true, 0, 10_000, false)).toBe(false);
   });
 
   it("allows retrying a room whose status lookup failed without diagnostic labels", () => {

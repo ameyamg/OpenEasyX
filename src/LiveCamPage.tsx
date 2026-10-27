@@ -55,8 +55,11 @@ export function LiveCamUnavailable({ reason }: { reason: string }) {
   return <div className="live-unavailable"><span><Server/></span><p>OPEN EASYX SOURCES</p><h2>No live-cam plugin is ready</h2><small>{reason}</small><code>Plugins → Sources &amp; live</code></div>;
 }
 
-export function shouldRecoverNativeLiveMediaError(code: number | undefined, hidden: boolean, foregroundedAt: number, currentTime: number): boolean {
-  return code === 4 && (hidden || (foregroundedAt > 0 && currentTime - foregroundedAt < 5_000));
+export function shouldRecoverNativeLiveMediaError(code: number | undefined, hidden: boolean, foregroundedAt: number, currentTime: number, playbackRequested = true): boolean {
+  if (!playbackRequested) return false;
+  // Safari pauses its media element after a network/decode failure. The stall
+  // watchdog deliberately ignores paused media, so these errors need an explicit retry.
+  return code === 2 || code === 3 || (code === 4 && (hidden || (foregroundedAt > 0 && currentTime - foregroundedAt < 5_000)));
 }
 
 export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) {
@@ -66,6 +69,7 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
   const video = useRef<HTMLVideoElement>(null); const player = useRef<HTMLDivElement>(null); const hideTimer = useRef<number | undefined>(undefined);
   const initialAudio = useRef(loadPlayerAudio(undefined, { volume: 1, muted: true }));
   const refreshBudget = useRef(createLiveRefreshBudget());
+  const playbackRequested = useRef(true);
   const [streamUrl, setStreamUrl] = useState(""); const [error, setError] = useState(""); const [retry, setRetry] = useState(0);
   const [playing, setPlaying] = useState(false); const [waiting, setWaiting] = useState(true); const [controls, setControls] = useState(true);
   const [volume, setVolume] = useState(initialAudio.current.volume); const [muted, setMuted] = useState(initialAudio.current.muted);
@@ -76,7 +80,11 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
   };
   const togglePlayback = () => {
     const element = video.current; if (!element) return;
-    if (element.paused) void element.play().catch(() => setWaiting(false)); else element.pause();
+    playbackRequested.current = element.paused;
+    if (element.paused) void element.play().catch((reason: unknown) => {
+      if (reason instanceof DOMException && reason.name === "NotAllowedError") playbackRequested.current = false;
+      setWaiting(false);
+    }); else element.pause();
   };
   const toggleMute = () => {
     const element = video.current; if (!element) return;
@@ -104,7 +112,7 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
       .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : String(reason)); });
     return () => { active = false; };
   }, [streamCam, retry]);
-  useEffect(() => { refreshBudget.current.reset(); }, [streamCam]);
+  useEffect(() => { refreshBudget.current.reset(); playbackRequested.current = true; }, [streamCam]);
   useEffect(() => {
     const element = video.current; if (!element || !streamUrl) return;
     let hls: HlsInstance | undefined; let active = true; let nativeHls = false; let wasPlayingBeforeHidden = false; let needsNativeRecovery = false; let recoveryQueued = false; let foregroundedAt = 0;
@@ -113,12 +121,18 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
       if (!active) return;
       stopped = true; hls?.stopLoad(); element.pause(); setWaiting(false); setPlaying(false); setError(message);
     };
-    const play = () => void element.play().catch((reason: unknown) => {
-      if (!active || stopped) return;
-      if (reason instanceof DOMException && (reason.name === "NotAllowedError" || reason.name === "AbortError")) { setWaiting(false); return; }
-      fail("The live stream could not be played. Try opening it again.");
-    });
-    const canPlay = () => { if (!stopped && element.paused) play(); };
+    const play = () => {
+      if (!playbackRequested.current) return;
+      void element.play().catch((reason: unknown) => {
+        if (!active || stopped) return;
+        if (reason instanceof DOMException && (reason.name === "NotAllowedError" || reason.name === "AbortError")) {
+          if (reason.name === "NotAllowedError") playbackRequested.current = false;
+          setWaiting(false); return;
+        }
+        fail("The live stream could not be played. Try opening it again.");
+      });
+    };
+    const canPlay = () => { if (!stopped && playbackRequested.current && element.paused) play(); };
     const reload = () => {
       if (!active || stopped) return;
       setWaiting(true);
@@ -128,7 +142,7 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
       else { element.src = streamUrl; element.load(); play(); }
     };
     const refreshStream = () => {
-      if (!active || stopped || recoveryQueued) return;
+      if (!active || stopped || recoveryQueued || !playbackRequested.current) return;
       if (!refreshBudget.current.take()) { fail("The live stream keeps disconnecting. Try again when the connection is stable."); return; }
       recoveryQueued = true; setError(""); setWaiting(true); setPlaying(false); setRetry((value) => value + 1);
     };
@@ -144,7 +158,7 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
       // HLS.js owns MediaSource error recovery; do not cover its retries with
       // a terminal native-player error overlay.
       if (hls) return;
-      if (nativeHls && shouldRecoverNativeLiveMediaError(code, document.hidden, foregroundedAt, Date.now())) {
+      if (nativeHls && shouldRecoverNativeLiveMediaError(code, document.hidden, foregroundedAt, Date.now(), playbackRequested.current)) {
         needsNativeRecovery = true; setError(""); setWaiting(true); setPlaying(false);
         if (!document.hidden) refreshStream();
         return;
@@ -155,9 +169,9 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
       if (!nativeHls) return;
       if (document.hidden) { wasPlayingBeforeHidden = !element.paused; return; }
       foregroundedAt = Date.now();
-      if (!wasPlayingBeforeHidden) return;
+      if (!playbackRequested.current) return;
       if (needsNativeRecovery || element.error?.code === 4) { refreshStream(); return; }
-      void element.play().catch(() => { if (element.error?.code === 4) refreshStream(); });
+      if (wasPlayingBeforeHidden) play();
     };
     element.addEventListener("error", mediaError);
     document.addEventListener("visibilitychange", visibilityChanged);
@@ -197,7 +211,7 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
       </div><div className="player-controls-right"><button className="player-icon-button" onClick={() => void toggleFullscreen()} aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}>{fullscreen ? <Minimize/> : <Maximize/>}</button></div></div></div>
     </div>
     {!streamUrl && !error && <div className="live-stage-status"><LoaderCircle className="spin"/><b>Opening live stream…</b><small>Open EasyX is resolving a fresh provider URL.</small></div>}
-    {error && <div className="live-stage-status error"><AlertTriangle/><b>Live player unavailable</b><small>{error}</small><button className="quiet" onClick={() => { refreshBudget.current.reset(); setRetry((value) => value + 1); }}><RefreshCw/>Try again</button></div>}
+    {error && <div className="live-stage-status error"><AlertTriangle/><b>Live player unavailable</b><small>{error}</small><button className="quiet" onClick={() => { refreshBudget.current.reset(); playbackRequested.current = true; setRetry((value) => value + 1); }}><RefreshCw/>Try again</button></div>}
   </div>;
 }
 
