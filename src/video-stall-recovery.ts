@@ -2,6 +2,7 @@ export const VIDEO_STALL_THRESHOLD_MS = 4_000;
 export const VIDEO_STALL_RECOVERY_COOLDOWN_MS = 10_000;
 export const VIDEO_STALL_MIN_ADVANCE_SECONDS = 1.25;
 export const VIDEO_STALL_MAX_RECOVERIES = 3;
+export const LIVE_STALL_THRESHOLD_MS = 12_000;
 const HAVE_FUTURE_DATA = 3;
 
 export type VideoStallState = {
@@ -58,7 +59,9 @@ function decodedFrames(element: FrameVideo) {
 }
 
 export function monitorVideoStalls(element: HTMLVideoElement, options: {
-  reload?: () => void;
+  /** Live streams must also recover when buffering stops the playback clock. */
+  live?: boolean;
+  reload?: (attempt: number) => void;
   failed?: () => void;
 } = {}) {
   let state = videoStallState(performance.now(), element.currentTime);
@@ -68,6 +71,8 @@ export function monitorVideoStalls(element: HTMLVideoElement, options: {
   let animationRequest: number | undefined;
   let failed = false;
   let previousDecodedFrames = decodedFrames(element);
+  let lastPlaybackTime = element.currentTime;
+  let lastPlaybackAt = performance.now();
   const hasFrameCallback = typeof element.requestVideoFrameCallback === "function";
   const hasFrameCounter = previousDecodedFrames !== undefined;
 
@@ -81,9 +86,13 @@ export function monitorVideoStalls(element: HTMLVideoElement, options: {
   const playbackBaseline = () => {
     state.lastFrameAt = performance.now();
     state.lastFrameMediaTime = element.currentTime;
+    lastPlaybackAt = state.lastFrameAt;
+    lastPlaybackTime = element.currentTime;
   };
   element.addEventListener("loadeddata", playbackBaseline);
   element.addEventListener("seeked", playbackBaseline);
+  element.addEventListener("play", playbackBaseline);
+  document.addEventListener("visibilitychange", playbackBaseline);
 
   const timer = window.setInterval(() => {
     if (!hasFrameCallback && hasFrameCounter) {
@@ -93,15 +102,22 @@ export function monitorVideoStalls(element: HTMLVideoElement, options: {
       }
       previousDecodedFrames = nextDecodedFrames;
     }
-    if ((!hasFrameCallback && !hasFrameCounter) || recovering || failed) return;
+    if ((!hasFrameCallback && !hasFrameCounter && !options.live) || recovering || failed) return;
     const now = performance.now();
+    if (element.paused || element.ended || document.hidden) { playbackBaseline(); return; }
+    if (!element.seeking && Math.abs(element.currentTime - lastPlaybackTime) > 0.01) lastPlaybackAt = now;
+    lastPlaybackTime = element.currentTime;
+    const liveStalled = options.live
+      && now - (hasFrameCallback || hasFrameCounter ? state.lastFrameAt : lastPlaybackAt) >= LIVE_STALL_THRESHOLD_MS
+      && now - state.lastRecoveryAt >= VIDEO_STALL_RECOVERY_COOLDOWN_MS;
     // Check one final time after the retry budget, so a persistent black screen
     // becomes an actionable error rather than silently abandoning recovery.
-    if (!shouldRecoverVideoStall({ ...state, consecutiveRecoveries: 0 }, {
+    const decoderStalled = (hasFrameCallback || hasFrameCounter) && shouldRecoverVideoStall({ ...state, consecutiveRecoveries: 0 }, {
       now, currentTime: element.currentTime, duration: element.duration,
       paused: element.paused, ended: element.ended, seeking: element.seeking,
       readyState: element.readyState, hidden: document.hidden,
-    })) return;
+    });
+    if (!liveStalled && !decoderStalled) return;
 
     if (state.consecutiveRecoveries >= VIDEO_STALL_MAX_RECOVERIES) {
       failed = true;
@@ -112,8 +128,9 @@ export function monitorVideoStalls(element: HTMLVideoElement, options: {
     recovering = true;
     const resumeAt = element.currentTime;
     noteVideoStallRecovery(state, now, resumeAt);
-    if (state.consecutiveRecoveries > 1 && options.reload) {
-      try { options.reload(); } finally { recovering = false; }
+    lastPlaybackAt = now;
+    if ((options.live || state.consecutiveRecoveries > 1) && options.reload) {
+      try { options.reload(state.consecutiveRecoveries); } finally { recovering = false; }
       return;
     }
     element.pause();
@@ -134,6 +151,8 @@ export function monitorVideoStalls(element: HTMLVideoElement, options: {
     if (animationRequest !== undefined) window.cancelAnimationFrame(animationRequest);
     element.removeEventListener("loadeddata", playbackBaseline);
     element.removeEventListener("seeked", playbackBaseline);
+    element.removeEventListener("play", playbackBaseline);
+    document.removeEventListener("visibilitychange", playbackBaseline);
     if (frameRequest !== undefined && typeof element.cancelVideoFrameCallback === "function") element.cancelVideoFrameCallback(frameRequest);
   };
 }

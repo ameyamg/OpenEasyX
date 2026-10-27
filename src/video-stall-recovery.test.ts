@@ -49,7 +49,7 @@ describe("video stall monitor", () => {
     frameCallback = undefined;
     renderedFrame = undefined;
     vi.spyOn(performance, "now").mockImplementation(() => now);
-    vi.stubGlobal("document", { hidden: false });
+    vi.stubGlobal("document", Object.assign(new EventTarget(), { hidden: false }));
     vi.stubGlobal("window", {
       setInterval, clearInterval,
       requestAnimationFrame: vi.fn((callback) => { frameCallback = callback; return 42; }),
@@ -121,5 +121,80 @@ describe("video stall monitor", () => {
     await vi.advanceTimersByTimeAsync(1000);
     frameCallback?.(now);
     expect(element.play).toHaveBeenCalledOnce();
+  });
+
+  it("recovers a live stream whose picture and playback clock both stopped during buffering", async () => {
+    const reload = vi.fn();
+    cleanup = monitorVideoStalls(element, { live: true, reload });
+    Object.assign(element, { readyState: 2, duration: Infinity });
+    await tick(11_000, 2);
+    expect(reload).not.toHaveBeenCalled();
+    await tick(12_000, 2);
+    expect(reload).toHaveBeenCalledExactlyOnceWith(1);
+    expect(element.pause).not.toHaveBeenCalled();
+    await tick(25_000, 2);
+    expect(reload).toHaveBeenLastCalledWith(2);
+  });
+
+  it("detects a live buffering stall even without a browser frame API", async () => {
+    Object.assign(element, { requestVideoFrameCallback: undefined, readyState: 1 });
+    const reload = vi.fn();
+    cleanup = monitorVideoStalls(element, { live: true, reload });
+    await tick(13_000, 2);
+    expect(reload).toHaveBeenCalledOnce();
+  });
+
+  it("gives live playback a fresh grace period after a pause or hidden tab", async () => {
+    const reload = vi.fn();
+    cleanup = monitorVideoStalls(element, { live: true, reload });
+    Object.assign(element, { paused: true }); await tick(60_000, 2);
+    Object.assign(element, { paused: false }); await tick(61_000, 2);
+    expect(reload).not.toHaveBeenCalled();
+    Object.assign(document, { hidden: true }); await tick(90_000, 2);
+    Object.assign(document, { hidden: false }); await tick(91_000, 2);
+    expect(reload).not.toHaveBeenCalled();
+    await tick(103_000, 2);
+    expect(reload).toHaveBeenCalledOnce();
+  });
+
+  it("does not mistake healthy live frames for a stall when Safari's clock stays unchanged", async () => {
+    const reload = vi.fn();
+    cleanup = monitorVideoStalls(element, { live: true, reload });
+    for (let time = 1000; time <= 30000; time += 1000) {
+      renderedFrame?.(time, { mediaTime: time / 1000 } as VideoFrameCallbackMetadata);
+      await tick(time, 2);
+    }
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it("leaves healthy live playback alone when only the playback clock is available", async () => {
+    Object.assign(element, { requestVideoFrameCallback: undefined });
+    const reload = vi.fn();
+    cleanup = monitorVideoStalls(element, { live: true, reload });
+    for (let time = 1000; time <= 30000; time += 1000) await tick(time, time / 1000);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it("does not immediately restart a live after Safari suspended background timers", async () => {
+    const reload = vi.fn();
+    cleanup = monitorVideoStalls(element, { live: true, reload });
+    now = 60_000;
+    document.dispatchEvent(new Event("visibilitychange"));
+    await tick(61_000, 2);
+    expect(reload).not.toHaveBeenCalled();
+    await tick(73_000, 2);
+    expect(reload).toHaveBeenCalledOnce();
+  });
+
+  it("bounds repeated live buffering recovery and stops when the viewer closes", async () => {
+    const reload = vi.fn(); const failed = vi.fn();
+    Object.assign(element, { readyState: 2 });
+    cleanup = monitorVideoStalls(element, { live: true, reload, failed });
+    for (let time = 12_000; time <= 60_000; time += 12_000) await tick(time, 2);
+    expect(reload).toHaveBeenCalledTimes(3);
+    expect(failed).toHaveBeenCalledOnce();
+    cleanup(); cleanup = undefined;
+    await tick(90_000, 2);
+    expect(reload).toHaveBeenCalledTimes(3);
   });
 });

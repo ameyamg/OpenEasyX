@@ -4,6 +4,7 @@ import { AlertTriangle, ArrowLeft, Download, Eye, LoaderCircle, Maximize, Minimi
 import { api } from "./api";
 import { loadPlayerAudio, savePlayerAudio } from "./player-audio";
 import { monitorVideoStalls } from "./video-stall-recovery";
+import { createLiveRefreshBudget, createLiveStallRecovery } from "./live-stream-recovery";
 import { usePlayerFullscreen } from "./player-fullscreen";
 import "./player.css";
 import "./watch-page.css";
@@ -64,6 +65,7 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
   const streamCam = useMemo(() => ({ id: cam.id, username: cam.username, pageUrl: cam.pageUrl, providerId: cam.providerId }), [cam.providerId, cam.id, cam.username, cam.pageUrl]);
   const video = useRef<HTMLVideoElement>(null); const player = useRef<HTMLDivElement>(null); const hideTimer = useRef<number | undefined>(undefined);
   const initialAudio = useRef(loadPlayerAudio(undefined, { volume: 1, muted: true }));
+  const refreshBudget = useRef(createLiveRefreshBudget());
   const [streamUrl, setStreamUrl] = useState(""); const [error, setError] = useState(""); const [retry, setRetry] = useState(0);
   const [playing, setPlaying] = useState(false); const [waiting, setWaiting] = useState(true); const [controls, setControls] = useState(true);
   const [volume, setVolume] = useState(initialAudio.current.volume); const [muted, setMuted] = useState(initialAudio.current.muted);
@@ -102,6 +104,7 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
       .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : String(reason)); });
     return () => { active = false; };
   }, [streamCam, retry]);
+  useEffect(() => { refreshBudget.current.reset(); }, [streamCam]);
   useEffect(() => {
     const element = video.current; if (!element || !streamUrl) return;
     let hls: HlsInstance | undefined; let active = true; let nativeHls = false; let wasPlayingBeforeHidden = false; let needsNativeRecovery = false; let recoveryQueued = false; let foregroundedAt = 0;
@@ -124,10 +127,17 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
       if (hls) hls.recoverMediaError();
       else { element.src = streamUrl; element.load(); play(); }
     };
-    const recoverNativeStream = () => {
-      if (!active || recoveryQueued) return;
+    const refreshStream = () => {
+      if (!active || stopped || recoveryQueued) return;
+      if (!refreshBudget.current.take()) { fail("The live stream keeps disconnecting. Try again when the connection is stable."); return; }
       recoveryQueued = true; setError(""); setWaiting(true); setPlaying(false); setRetry((value) => value + 1);
     };
+    const recoverStall = createLiveStallRecovery({
+      seekable: () => element.seekable,
+      seek: (target) => { element.currentTime = target; hls?.startLoad(target); },
+      resume: play,
+      refresh: refreshStream,
+    });
     const mediaError = () => {
       if (!active) return;
       const code = element.error?.code;
@@ -136,7 +146,7 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
       if (hls) return;
       if (nativeHls && shouldRecoverNativeLiveMediaError(code, document.hidden, foregroundedAt, Date.now())) {
         needsNativeRecovery = true; setError(""); setWaiting(true); setPlaying(false);
-        if (!document.hidden) recoverNativeStream();
+        if (!document.hidden) refreshStream();
         return;
       }
       fail(code ? `The browser could not play this live stream (media error ${code}).` : "The live stream could not be played.");
@@ -146,8 +156,8 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
       if (document.hidden) { wasPlayingBeforeHidden = !element.paused; return; }
       foregroundedAt = Date.now();
       if (!wasPlayingBeforeHidden) return;
-      if (needsNativeRecovery || element.error?.code === 4) { recoverNativeStream(); return; }
-      void element.play().catch(() => { if (element.error?.code === 4) recoverNativeStream(); });
+      if (needsNativeRecovery || element.error?.code === 4) { refreshStream(); return; }
+      void element.play().catch(() => { if (element.error?.code === 4) refreshStream(); });
     };
     element.addEventListener("error", mediaError);
     document.addEventListener("visibilitychange", visibilityChanged);
@@ -169,7 +179,7 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
         fail("The live stream stopped or could not be decoded. Try opening a fresh stream.");
       });
     };
-    const stopMonitoring = monitorVideoStalls(element, { reload, failed: () => fail("The live image is still frozen. Try opening a fresh stream.") });
+    const stopMonitoring = monitorVideoStalls(element, { live: true, reload: () => { if (active && !stopped && !recoveryQueued) recoverStall(); }, failed: () => fail("The live image is still frozen. Try opening a fresh stream.") });
     void start().catch(() => fail("The live player could not be initialized."));
     return () => { active = false; stopMonitoring(); element.removeEventListener("canplay", canPlay); element.removeEventListener("error", mediaError); document.removeEventListener("visibilitychange", visibilityChanged); hls?.destroy(); element.pause(); element.removeAttribute("src"); element.load(); };
   }, [streamUrl]);
@@ -187,7 +197,7 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
       </div><div className="player-controls-right"><button className="player-icon-button" onClick={() => void toggleFullscreen()} aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}>{fullscreen ? <Minimize/> : <Maximize/>}</button></div></div></div>
     </div>
     {!streamUrl && !error && <div className="live-stage-status"><LoaderCircle className="spin"/><b>Opening live stream…</b><small>Open EasyX is resolving a fresh provider URL.</small></div>}
-    {error && <div className="live-stage-status error"><AlertTriangle/><b>Live player unavailable</b><small>{error}</small><button className="quiet" onClick={() => setRetry((value) => value + 1)}><RefreshCw/>Try again</button></div>}
+    {error && <div className="live-stage-status error"><AlertTriangle/><b>Live player unavailable</b><small>{error}</small><button className="quiet" onClick={() => { refreshBudget.current.reset(); setRetry((value) => value + 1); }}><RefreshCw/>Try again</button></div>}
   </div>;
 }
 

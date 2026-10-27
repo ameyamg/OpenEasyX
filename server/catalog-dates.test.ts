@@ -26,12 +26,12 @@ function fixture() {
     return item;
   };
   // Linux/NAS mounts may not expose a file creation time.
-  const statSync = fs.statSync;
-  vi.spyOn(fs, "statSync").mockImplementation(((file: fs.PathLike, ...args: any[]) => {
-    const stat = (statSync as any)(file, ...args);
+  const statFile = fs.promises.stat;
+  vi.spyOn(fs.promises, "stat").mockImplementation((async (file: fs.PathLike, ...args: any[]) => {
+    const stat = await (statFile as any)(file, ...args);
     if (String(file).endsWith(".mp4")) { stat.birthtime = new Date(0); stat.birthtimeMs = 0; }
     return stat;
-  }) as typeof fs.statSync);
+  }) as typeof fs.promises.stat);
   return { root, mediaRoot, db, library, catalog, source, add };
 }
 

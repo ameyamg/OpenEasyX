@@ -37,25 +37,25 @@ function sourceDomain(value: string) {
   }
 }
 
-function readSidecar(file: string): Record<string, unknown> {
+async function readSidecar(file: string): Promise<Record<string, unknown>> {
   const candidates = [file.replace(/\.[^.]+$/, ".info.json"), file.replace(/\.[^.]+$/, ".json")];
   for (const candidate of candidates) {
     try {
-      if (fs.statSync(candidate).size > 8 * 1024 * 1024) continue;
-      const value = JSON.parse(fs.readFileSync(candidate, "utf8"));
+      if ((await fs.promises.stat(candidate)).size > 8 * 1024 * 1024) continue;
+      const value = JSON.parse(await fs.promises.readFile(candidate, "utf8"));
       if (value && typeof value === "object" && !Array.isArray(value)) return value;
     } catch { /* Sidecars are optional and never block a scan. */ }
   }
   return {};
 }
 
-function walk(root: string): string[] {
+async function walk(root: string): Promise<string[]> {
   const files: string[] = [];
   const stack = [root];
   while (stack.length) {
     const directory = stack.pop()!;
     let entries: fs.Dirent[];
-    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { continue; }
+    try { entries = await fs.promises.readdir(directory, { withFileTypes: true }); } catch { continue; }
     for (const entry of entries) {
       if (entry.name.startsWith(".") || entry.isSymbolicLink()) continue;
       const absolute = path.join(directory, entry.name);
@@ -115,7 +115,7 @@ export class Catalog {
       const started = Date.now();
       const scanId = new Date().toISOString();
       let indexed = 0;
-      const files = [...walk(this.mediaRoot)].map((absolute) => {
+      const files = (await walk(this.mediaRoot)).map((absolute) => {
         const extension = path.extname(absolute).toLowerCase();
         const kind: MediaKind | undefined = VIDEO_EXTENSIONS.has(extension) ? "video" : IMAGE_EXTENSIONS.has(extension) ? "image" : undefined;
         return kind ? { absolute, extension, kind } : undefined;
@@ -124,10 +124,10 @@ export class Catalog {
       if (!files.length) this.status.progress = 100;
       for (const [index, { absolute, extension, kind }] of files.entries()) {
         try {
-          const stat = fs.statSync(absolute);
+          const stat = await fs.promises.stat(absolute);
           const relativePath = path.relative(this.mediaRoot, absolute).split(path.sep).join("/");
           const parts = relativePath.split("/");
-          const metadata = { ...readSidecar(absolute), ...this.storedMetadata?.(relativePath) };
+          const metadata = { ...(await readSidecar(absolute)), ...this.storedMetadata?.(relativePath) };
           const titleValue = metadataString(metadata, ["title"]);
           const performerValue = metadataString(metadata, ["performer"]);
           const sourceValue = metadataString(metadata, ["source", "sourceUrl", "source_url", "webpage_url", "url"]);
