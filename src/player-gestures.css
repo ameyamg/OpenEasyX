@@ -1,0 +1,47 @@
+/* Touch gestures, zoom and casting on the custom video player. */
+.custom-player .player-surface { overflow: hidden; touch-action: pan-y; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.custom-player.zoomed .player-surface { touch-action: none; cursor: grab; }
+.custom-player .player-surface video { will-change: transform; }
+
+.player-seek-flash {
+  position: absolute; z-index: 6; top: 0; bottom: 0; width: 38%;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  color: #fff; font-size: 13px; font-weight: 750; pointer-events: none;
+  background: radial-gradient(ellipse at center, rgba(255, 255, 255, .2), rgba(255, 255, 255, 0) 70%);
+  animation: player-seek-flash .7s ease-out forwards;
+}
+.player-seek-flash.left { left: 0; border-radius: 0 50% 50% 0; }
+.player-seek-flash.right { right: 0; border-radius: 50% 0 0 50%; }
+.player-seek-flash svg { width: 34px; height: 34px; }
+@keyframes player-seek-flash { 0% { opacity: 0; } 15% { opacity: 1; } 70% { opacity: 1; } 100% { opacity: 0; } }
+
+.player-speed-badge {
+  position: absolute; z-index: 7; top: 14px; left: 50%; transform: translateX(-50%);
+  display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px;
+  color: #fff; background: rgba(8, 8, 10, .72); backdrop-filter: blur(10px);
+  font-size: 12px; font-weight: 750; pointer-events: none;
+}
+.player-speed-badge svg { width: 14px; height: 14px; }
+
+.player-zoom-reset {
+  position: absolute; z-index: 9; top: 12px; right: 12px;
+  display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid rgba(255, 255, 255, .25); border-radius: 999px;
+  color: #fff; background: rgba(8, 8, 10, .72); font-size: 12px; font-weight: 700; cursor: pointer;
+}
+.player-zoom-reset svg { width: 14px; height: 14px; }
+
+.player-cast-overlay {
+  position: absolute; z-index: 6; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  color: #fff; text-align: center; background: rgba(0, 0, 0, .78); pointer-events: none;
+}
+.player-cast-overlay svg { width: 42px; height: 42px; opacity: .85; }
+.player-cast-overlay b { font-size: 15px; }
+.player-cast-overlay button { pointer-events: auto; }
+.player-cast-button.active { color: var(--player-accent, #fa4058); }
+.player-cast-button.unavailable { opacity: .55; }
+
+/* The control bar's gradient covers the lower half of a small (phone) player. Only its
+   buttons and sliders take touches, so taps and double taps there reach the video. */
+.custom-player .player-controls { pointer-events: none; }
+.custom-player .player-controls :is(button, input, select, label, .player-timeline, .caption-menu, .player-volume) { pointer-events: auto; }
+.custom-player.controls-hidden .player-controls :is(button, input, select, label, .player-timeline, .caption-menu, .player-volume) { pointer-events: none; }

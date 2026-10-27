@@ -72,3 +72,15 @@ describe("delete from the player", () => {
     expect(html).not.toContain("watch-delete");
   });
 });
+
+describe("video player gestures and casting", () => {
+  it("renders the gesture surface and a cast button", () => {
+    vi.stubGlobal("localStorage", { getItem: () => null, setItem: vi.fn() });
+    const html = renderToStaticMarkup(<PlayerViewer media={video} context={{ ids: ["video-1"] }} close={vi.fn()} favorite={vi.fn()} advance={vi.fn()} setNotice={vi.fn()}/>);
+    expect(html).toContain('class="player-surface"');
+    expect(html).toContain('aria-label="Cast to a TV"');
+    expect(html).toContain('aria-label="Mute"');
+    expect(html).toContain('aria-label="Volume"');
+    expect(html).not.toContain("player-zoom-reset");
+  });
+});

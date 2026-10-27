@@ -61,6 +61,27 @@ To avoid re-encoding, keep **Settings → Live recording preset** on **Original 
 
 Chaturbate stream extraction uses IPv4 by default to avoid unreachable IPv6 routes in containers. The **Use IPv4 for stream extraction** setting can be disabled on networks requiring IPv6. It applies to yt-dlp's metadata and playlist requests; FFmpeg makes its own connections while capturing. If errors persist, check connectivity from the Open EasyX container and the recording error in Activity.
 
+## Video player gestures and casting
+
+On a phone or tablet the video player supports:
+
+| Gesture | Action |
+| --- | --- |
+| Tap | show or hide the controls |
+| Double tap right / left | skip 10 seconds forward / back (each further quick tap adds 10 seconds) |
+| Press and hold on the right | play at 2× while held |
+| Pinch with two fingers | zoom in or out (drag with one finger while zoomed; tap the zoom badge to reset) |
+
+With a mouse, a click plays or pauses, a double click toggles fullscreen and holding on the right plays at 2×. The keyboard keeps Space/K, ←/→, M and F.
+
+The cast button sends the video to a TV:
+
+- **Chromecast / Google TV** works in Chrome or Edge when Open EasyX is opened over **HTTPS** (for example through a Synology or Nginx reverse proxy with a certificate); Google only offers its cast API on secure pages. Over plain `http://NAS:3210`, use the browser menu (⋮ → Cast…) to cast the tab.
+- **AirPlay** works from Safari on iPhone, iPad and Mac, also over plain HTTP.
+- Chrome on Android may also offer its built-in remote playback for the video.
+
+The TV loads the file directly from Open EasyX, so open the app by the NAS address or host name (not `localhost`). Chromecast plays MP4 (H.264/AAC) and WebM; other formats need one of the re-encoding recording presets.
+
 ## Local development
 
 Requirements: Node.js 22.5 or newer, Git, FFmpeg, and the downloader helpers used by the plugins you enable.
