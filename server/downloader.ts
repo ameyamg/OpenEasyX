@@ -48,9 +48,15 @@ export class DownloadQueue {
     private plugins: PluginManager,
     private mediaRoot: string,
     private writeLog?: LogWriter,
-    private onCompleted?: () => unknown | Promise<unknown>,
+    private onCompleted?: (relativePath: string, replacedPath?: string) => unknown | Promise<unknown>,
     private onDeleteCompleted?: (item: DownloadItem) => unknown,
   ) {}
+
+  private notifyCatalog(relativePath: string, replacedPath?: string) {
+    // Catalog failures must not turn a successfully stored download into a failure.
+    void Promise.resolve().then(() => this.onCompleted?.(relativePath, replacedPath))
+      .catch((error) => this.writeLog?.("warn", "library", "Library indexing failed", { relativePath, error }));
+  }
 
   /** Resolves once interrupted recordings are recovered and the queue runs. */
   start(): Promise<void> {
@@ -369,6 +375,7 @@ export class DownloadQueue {
             if (duplicate.storagePath) await this.applyMediaDate(path.join(this.mediaRoot, duplicate.storagePath), duplicate.mediaType, canonicalDate);
             this.db.setItemStatus(item.id, "duplicate", { progress: 1, checksum, duplicateOf: duplicate.id });
             this.writeLog?.("info", "download", "Duplicate download discarded", { itemId: item.id, duplicateOf: duplicate.id, title: item.title });
+            this.notifyCatalog(duplicate.storagePath);
             return;
           }
           this.db.setCanonicalMediaDate(item.id, canonicalDate);
@@ -383,7 +390,7 @@ export class DownloadQueue {
           this.writeLog?.("info", "download", "Higher-quality download stored", { itemId: item.id, replacedItemId: duplicate.id, storagePath: relativePath });
           this.db.supersedeDownload(duplicate.id, item.id);
           if (plugin.afterDownload) await plugin.afterDownload(this.plugins.context(item.pluginId), { absolutePath: finalPath, relativePath, mediaType: item.mediaType, checksumSha256: checksum });
-          void Promise.resolve(this.onCompleted?.()).catch((error) => this.writeLog?.("warn", "library", "Library refresh after download failed", { error }));
+          this.notifyCatalog(relativePath, duplicate.storagePath);
           return;
         }
         const canonicalDate = this.db.setCanonicalMediaDate(item.id, item.publishedAt);
@@ -395,7 +402,7 @@ export class DownloadQueue {
         if (comparison) this.db.setVideoFingerprint(item.id, videoFileStamp(finalPath), comparison.fingerprint);
         this.writeLog?.("info", "download", "Download completed", { itemId: item.id, storagePath: relativePath, mediaType: item.mediaType });
         if (plugin.afterDownload) await plugin.afterDownload(this.plugins.context(item.pluginId), { absolutePath: finalPath, relativePath, mediaType: item.mediaType, checksumSha256: checksum });
-        void Promise.resolve(this.onCompleted?.()).catch((error) => this.writeLog?.("warn", "library", "Library refresh after download failed", { error }));
+        this.notifyCatalog(relativePath);
       });
     } catch (error) {
       // Interrupted by the shutdown: a live recording keeps its parts for recovery on the
@@ -484,7 +491,6 @@ export class DownloadQueue {
   private stagingDirectory(itemId: string) { return path.join(this.downloadsRoot, safeSegment(itemId, "download")); }
 
   private async recoverInterruptedRecordings(items: DownloadItem[]) {
-    let recovered = 0;
     for (const item of items) {
       if (this.stopped) return;
       const directory = this.stagingDirectory(item.id);
@@ -521,8 +527,8 @@ export class DownloadQueue {
         const storagePath = path.relative(this.mediaRoot, finalPath);
         this.db.setItemStatus(item.id, "completed", { progress: 1, checksum, storagePath, error: null });
         fs.rmSync(directory, { recursive: true, force: true });
-        recovered += 1;
         this.writeLog?.("info", "download", "Live recording interrupted by a restart was saved", { itemId: item.id, title: item.title, storagePath, parts: input.parts?.length ?? 1 });
+        this.notifyCatalog(storagePath);
       } catch (error) {
         fs.rmSync(output, { force: true });
         let kept = path.relative(this.mediaRoot, directory);
@@ -537,7 +543,6 @@ export class DownloadQueue {
         this.writeLog?.("error", "download", "Interrupted live recording could not be recovered", { itemId: item.id, kept, error: reason });
       }
     }
-    if (recovered) void Promise.resolve(this.onCompleted?.()).catch((error) => this.writeLog?.("warn", "library", "Library refresh after recovery failed", { error }));
   }
 
   private async checkVideoExcerpt(item: DownloadItem, file: string, control: ActiveDownload) {

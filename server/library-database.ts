@@ -162,7 +162,7 @@ export class LibraryDatabase {
   }
 
   upsertMedia(item: IndexedMedia) {
-    this.sqlite.prepare(`
+    const result = this.sqlite.prepare(`
       INSERT INTO media(
         id,relative_path,kind,title,performer,source,extension,mime_type,size,modified_at,
         added_at,duration,width,height,metadata_json,last_seen_scan,media_date,missing
@@ -174,15 +174,33 @@ export class LibraryDatabase {
         added_at=CASE WHEN julianday(media.added_at)>julianday('1970-01-01') THEN media.added_at ELSE excluded.added_at END,
         last_seen_scan=excluded.last_seen_scan,missing=0,
         playable=CASE WHEN media.size<>excluded.size OR media.modified_at<>excluded.modified_at THEN 1 ELSE media.playable END
+      WHERE media.kind IS NOT excluded.kind OR media.title IS NOT excluded.title
+        OR media.performer IS NOT excluded.performer OR media.source IS NOT excluded.source
+        OR media.extension IS NOT excluded.extension OR media.mime_type IS NOT excluded.mime_type
+        OR media.size IS NOT excluded.size OR media.modified_at IS NOT excluded.modified_at
+        OR media.media_date IS NOT excluded.media_date OR media.metadata_json IS NOT excluded.metadata_json
+        OR media.missing<>0
+        OR (COALESCE(julianday(media.added_at),0)<=julianday('1970-01-01') AND media.added_at IS NOT excluded.added_at)
     `).run(
       item.id, item.relativePath, item.kind, item.title, item.performer, item.source,
       item.extension, item.mimeType, item.size, item.modifiedAt, item.addedAt,
       item.duration, item.width, item.height, JSON.stringify(item.metadata), item.scanId, item.mediaDate ?? item.modifiedAt,
     );
+    return Number(result.changes) > 0;
   }
 
-  finishScan(scanId: string) {
-    this.sqlite.prepare("UPDATE media SET missing=1 WHERE last_seen_scan<>? AND missing=0").run(scanId);
+  finishScan(scanId: string, seenIds: ReadonlySet<string>) {
+    // Presence is collected in memory so an unchanged scan does not rewrite every
+    // catalog row. Targeted indexing during the scan also contributes to this set.
+    const missing = (this.sqlite.prepare("SELECT id FROM media WHERE last_seen_scan<>? AND missing=0").all(scanId) as Array<{ id: string }>)
+      .filter((row) => !seenIds.has(row.id));
+    if (!missing.length) return;
+    this.sqlite.exec("BEGIN");
+    try {
+      const mark = this.sqlite.prepare("UPDATE media SET missing=1 WHERE id=?");
+      for (const row of missing) mark.run(row.id);
+      this.sqlite.exec("COMMIT");
+    } catch (error) { this.sqlite.exec("ROLLBACK"); throw error; }
   }
 
   markMediaMissing(id: string) {

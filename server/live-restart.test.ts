@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -129,7 +129,8 @@ describe("live recordings across an application restart", () => {
       execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=1:size=160x120:rate=10", "-f", "lavfi", "-i", "sine=duration=1",
         "-c:v", "mpeg4", "-c:a", "aac", "-shortest", "-f", "mpegts", "-y", path.join(parts, name)]);
     }
-    const queue = new DownloadQueue(db, plugins, mediaDir);
+    const indexed = vi.fn();
+    const queue = new DownloadQueue(db, plugins, mediaDir, undefined, indexed);
     try {
       await queue.start();
       const saved = db.getItem(item.id)!;
@@ -138,6 +139,7 @@ describe("live recordings across an application restart", () => {
       const duration = Number(execFileSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", file]).toString());
       expect(duration).toBeGreaterThan(1.5);
       expect(fs.existsSync(path.join(mediaDir, ".downloads", item.id))).toBe(false);
+      expect(indexed).toHaveBeenCalledExactlyOnceWith(saved.storagePath, undefined);
     } finally { queue.stop(); db.close(); }
   });
 

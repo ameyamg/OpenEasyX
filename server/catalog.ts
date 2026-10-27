@@ -37,9 +37,10 @@ function sourceDomain(value: string) {
   }
 }
 
-async function readSidecar(file: string): Promise<Record<string, unknown>> {
+async function readSidecar(file: string, knownFiles?: ReadonlySet<string>): Promise<Record<string, unknown>> {
   const candidates = [file.replace(/\.[^.]+$/, ".info.json"), file.replace(/\.[^.]+$/, ".json")];
   for (const candidate of candidates) {
+    if (knownFiles && !knownFiles.has(candidate)) continue;
     try {
       if ((await fs.promises.stat(candidate)).size > 8 * 1024 * 1024) continue;
       const value = JSON.parse(await fs.promises.readFile(candidate, "utf8"));
@@ -83,6 +84,8 @@ function runFfmpeg(args: string[], timeoutMs: number) {
 
 export class Catalog {
   private scanPromise: Promise<{ indexed: number; durationMs: number }> | null = null;
+  private activeScan?: { id: string; seen: Set<string> };
+  private fileIndexes = new Map<string, Promise<string | undefined>>();
   private thumbnails = new Map<string, Promise<string>>();
   private previews = new Map<string, Promise<string>>();
   private playbackFiles = new Map<string, Promise<string>>();
@@ -103,6 +106,74 @@ export class Catalog {
     fs.mkdirSync(path.join(dataDir, "playback-cache"), { recursive: true, mode: 0o700 });
   }
 
+  /** Index a completed download without walking the library or changing full-scan progress. */
+  async indexStoredMedia(relativePath: string, replacedPath?: string): Promise<string | undefined> {
+    const id = await this.indexPath(relativePath);
+    if (id && replacedPath) {
+      const previous = this.storedPath(replacedPath);
+      const previousId = crypto.createHash("sha256").update(previous.relativePath).digest("hex").slice(0, 24);
+      if (previousId !== id) {
+        // A full scan may still be finishing an old read of the deleted file.
+        await this.fileIndexes.get(previous.absolute)?.catch(() => undefined);
+        this.db.markMediaMissing(previousId);
+      }
+    }
+    return id;
+  }
+
+  private storedPath(relativePath: string) {
+    const root = path.resolve(this.mediaRoot);
+    const absolute = path.resolve(root, ...relativePath.replaceAll("\\", "/").split("/"));
+    if (absolute === root || !absolute.startsWith(`${root}${path.sep}`)) throw new Error("Media path escapes the configured library root");
+    return { absolute, relativePath: path.relative(root, absolute).split(path.sep).join("/") };
+  }
+
+  private indexPath(relativePath: string, knownFiles?: ReadonlySet<string>): Promise<string | undefined> {
+    const file = this.storedPath(relativePath);
+    const previous = this.fileIndexes.get(file.absolute);
+    // Serialize only the same path: new downloads remain visible while a full scan
+    // waits on another file, and a replacement cannot be overwritten by a stale read.
+    const operation = (previous ?? Promise.resolve()).catch(() => undefined)
+      .then(() => this.indexFile(file, knownFiles)).finally(() => {
+        if (this.fileIndexes.get(file.absolute) === operation) this.fileIndexes.delete(file.absolute);
+      });
+    this.fileIndexes.set(file.absolute, operation);
+    return operation;
+  }
+
+  private async indexFile({ absolute, relativePath }: { absolute: string; relativePath: string }, knownFiles?: ReadonlySet<string>) {
+    const extension = path.extname(absolute).toLowerCase();
+    const kind: MediaKind | undefined = VIDEO_EXTENSIONS.has(extension) ? "video" : IMAGE_EXTENSIONS.has(extension) ? "image" : undefined;
+    if (!kind) return undefined;
+    const stat = await fs.promises.stat(absolute);
+    if (!stat.isFile()) return undefined;
+    const parts = relativePath.split("/");
+    const metadata = { ...(await readSidecar(absolute, knownFiles)), ...this.storedMetadata?.(relativePath) };
+    const titleValue = metadataString(metadata, ["title"]);
+    const performerValue = metadataString(metadata, ["performer"]);
+    const sourceValue = metadataString(metadata, ["source", "sourceUrl", "source_url", "webpage_url", "url"]);
+    const id = crypto.createHash("sha256").update(relativePath).digest("hex").slice(0, 24);
+    const fallbackDate = firstMediaDate(metadata.downloadedAt, stat.mtime.toISOString(), stat.birthtime.toISOString(), stat.ctime.toISOString()) ?? new Date().toISOString();
+    const mediaDate = (metadata.live === true
+      ? firstMediaDate(metadata.recordedAt, metadata.downloadStartedAt, metadata.downloadedAt)
+      : firstMediaDate(metadata.publishedAt, metadata.published_at, metadata.timestamp, metadata.release_timestamp,
+        metadata.upload_timestamp, metadata.upload_date, metadata.release_date, metadata.date_published,
+        metadata.datePublished, metadata.date, metadata.created_at)) ?? fallbackDate;
+    const changed = this.db.upsertMedia({
+      id, relativePath, kind, title: titleValue || cleanTitle(relativePath), performer: this.resolvePerformerName(performerValue || (parts.length > 1 ? parts[0] : "Unsorted")),
+      source: sourceDomain(sourceValue || (parts.length > 2 ? parts[1] : "")), extension, mimeType: MIMES[extension] ?? "application/octet-stream",
+      size: stat.size, modifiedAt: stat.mtime.toISOString(),
+      addedAt: firstMediaDate(stat.birthtime.toISOString(), metadata.downloadedAt) ?? fallbackDate, mediaDate,
+      duration: 0, width: 0, height: 0, metadata, scanId: this.activeScan?.id ?? crypto.randomUUID(),
+    });
+    this.activeScan?.seen.add(id);
+    if (changed && this.eagerThumbnails) {
+      const media = this.db.getMedia(id);
+      if (media) void this.thumbnail(media).catch(() => { this.db.markMediaUnplayable(media.id); });
+    }
+    return id;
+  }
+
   scan() {
     if (this.scanPromise) return this.scanPromise;
     this.status.running = true;
@@ -113,51 +184,26 @@ export class Catalog {
     this.status.progress = 0;
     this.scanPromise = Promise.resolve().then(async () => {
       const started = Date.now();
-      const scanId = new Date().toISOString();
+      const scan = { id: crypto.randomUUID(), seen: new Set<string>() };
+      this.activeScan = scan;
       let indexed = 0;
-      const files = (await walk(this.mediaRoot)).map((absolute) => {
+      const allFiles = new Set(await walk(this.mediaRoot));
+      const files = [...allFiles].filter((absolute) => {
         const extension = path.extname(absolute).toLowerCase();
-        const kind: MediaKind | undefined = VIDEO_EXTENSIONS.has(extension) ? "video" : IMAGE_EXTENSIONS.has(extension) ? "image" : undefined;
-        return kind ? { absolute, extension, kind } : undefined;
-      }).filter((file): file is { absolute: string; extension: string; kind: MediaKind } => !!file);
+        return VIDEO_EXTENSIONS.has(extension) || IMAGE_EXTENSIONS.has(extension);
+      });
       this.status.total = files.length;
       if (!files.length) this.status.progress = 100;
-      for (const [index, { absolute, extension, kind }] of files.entries()) {
+      for (const [index, absolute] of files.entries()) {
         try {
-          const stat = await fs.promises.stat(absolute);
-          const relativePath = path.relative(this.mediaRoot, absolute).split(path.sep).join("/");
-          const parts = relativePath.split("/");
-          const metadata = { ...(await readSidecar(absolute)), ...this.storedMetadata?.(relativePath) };
-          const titleValue = metadataString(metadata, ["title"]);
-          const performerValue = metadataString(metadata, ["performer"]);
-          const sourceValue = metadataString(metadata, ["source", "sourceUrl", "source_url", "webpage_url", "url"]);
-          const id = crypto.createHash("sha256").update(relativePath).digest("hex").slice(0, 24);
-          const fallbackDate = firstMediaDate(metadata.downloadedAt, stat.mtime.toISOString(), stat.birthtime.toISOString(), stat.ctime.toISOString()) ?? scanId;
-          const mediaDate = (metadata.live === true
-            ? firstMediaDate(metadata.recordedAt, metadata.downloadStartedAt, metadata.downloadedAt)
-            : firstMediaDate(metadata.publishedAt, metadata.published_at, metadata.timestamp, metadata.release_timestamp,
-              metadata.upload_timestamp, metadata.upload_date, metadata.release_date, metadata.date_published,
-              metadata.datePublished, metadata.date, metadata.created_at)) ?? fallbackDate;
-          this.db.upsertMedia({
-            id,
-            relativePath, kind, title: titleValue || cleanTitle(relativePath), performer: this.resolvePerformerName(performerValue || (parts.length > 1 ? parts[0] : "Unsorted")),
-            source: sourceDomain(sourceValue || (parts.length > 2 ? parts[1] : "")), extension, mimeType: MIMES[extension] ?? "application/octet-stream",
-            size: stat.size, modifiedAt: stat.mtime.toISOString(),
-            addedAt: firstMediaDate(stat.birthtime.toISOString(), metadata.downloadedAt) ?? fallbackDate, mediaDate,
-            duration: 0, width: 0, height: 0, metadata, scanId,
-          });
-          if (this.eagerThumbnails) {
-            const media = this.db.getMedia(id);
-            if (media) void this.thumbnail(media).catch(() => { this.db.markMediaUnplayable(media.id); });
-          }
-          indexed++;
+          if (await this.indexPath(path.relative(this.mediaRoot, absolute), allFiles)) indexed++;
         } catch { /* A file may disappear while the scan is in progress. */ }
         this.status.indexed = indexed;
         this.status.processed = index + 1;
         this.status.progress = Math.round(this.status.processed / this.status.total * 100);
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
-      this.db.finishScan(scanId);
+      this.db.finishScan(scan.id, scan.seen);
       this.status.indexed = indexed;
       this.status.progress = 100;
       this.status.lastScanAt = new Date().toISOString();
@@ -166,6 +212,7 @@ export class Catalog {
       this.status.error = error instanceof Error ? error.message : String(error);
       throw error;
     }).finally(() => {
+      this.activeScan = undefined;
       this.status.running = false;
       this.scanPromise = null;
     });

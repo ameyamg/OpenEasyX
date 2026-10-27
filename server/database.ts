@@ -159,6 +159,7 @@ export class Database {
     if (!itemColumns.has("duplicate_reason")) this.sqlite.exec("ALTER TABLE items ADD COLUMN duplicate_reason TEXT");
     this.sqlite.exec("CREATE INDEX IF NOT EXISTS items_visual_hash_idx ON items(performer_id,media_type,visual_hash)");
     this.sqlite.exec("CREATE INDEX IF NOT EXISTS items_storage_path_idx ON items(storage_path)");
+    this.sqlite.exec("CREATE INDEX IF NOT EXISTS items_completed_path_idx ON items(replace(storage_path,'\\','/')) WHERE status='completed'");
     this.migrateNitterToPublicX();
     this.setDefault("retentionDays", 0);
     this.setDefault("maxConcurrentDownloads", 2);

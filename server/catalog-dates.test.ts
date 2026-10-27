@@ -36,6 +36,16 @@ function fixture() {
 }
 
 describe("catalog media dates", () => {
+  it("looks up normalized completed paths through an index, including legacy Windows paths", () => {
+    const { db, add } = fixture();
+    const item = add("windows");
+    const relativePath = "Creator/source/windows.mp4";
+    db.setItemStatus(item.id, "completed", { storagePath: "Creator\\source\\windows.mp4" });
+    expect(db.storedMediaMetadata(relativePath)).toMatchObject({ performer: "Example", source: "example.test" });
+    const plan = db.sqlite.prepare("EXPLAIN QUERY PLAN SELECT * FROM items WHERE replace(storage_path,'\\','/')=? AND status='completed'").all(relativePath) as Array<{ detail: string }>;
+    expect(plan.some((step) => step.detail.includes("items_completed_path_idx"))).toBe(true);
+  });
+
   it("uses site publication and recording start dates for display and ordering, ignoring disk birthtime", async () => {
     const { db, library, catalog, add } = fixture();
     const live = add("live", "2020-01-01T00:00:00Z", true);

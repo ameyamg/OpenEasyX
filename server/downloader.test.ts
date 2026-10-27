@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -75,15 +75,21 @@ describe("DownloadQueue", () => {
     const source = db.addSource(person.id, "test.staging", { externalId: "source", label: "Source", profileUrl: "https://example.test/profile", domain: "example.test" });
     db.ingestItems(source, [{ externalId: "asset", mediaType: "video", filename: "asset.mp4", metadata: { url: `http://127.0.0.1:${address.port}/asset.mp4` } }]);
     const item = db.listItems()[0]; db.setItemStatus(item.id, "queued");
-    const queue = new DownloadQueue(db, manager, mediaDir); queue.start();
+    const libraryDb = new LibraryDatabase(dataDir);
+    const catalog = new Catalog(libraryDb, mediaDir, dataDir, false, (file) => db.storedMediaMetadata(file));
+    const indexed = vi.fn((file: string, replaced?: string) => catalog.indexStoredMedia(file, replaced));
+    const queue = new DownloadQueue(db, manager, mediaDir, undefined, indexed); queue.start();
     const staged = path.join(mediaDir, ".downloads", item.id, "asset.mp4");
     const completed = path.join(mediaDir, "Staging Performer", "example.test", "asset.mp4");
     await waitFor(() => fs.existsSync(staged) && fs.statSync(staged).size === 5);
     expect(fs.existsSync(completed)).toBe(false);
     finishResponse?.();
-    await waitFor(() => db.getItem(item.id)?.status === "completed"); queue.stop(); server.close();
+    await waitFor(() => db.getItem(item.id)?.status === "completed" && libraryDb.listMedia().total === 1); queue.stop(); server.close();
     expect(fs.readFileSync(completed, "utf8")).toBe("firstlast!");
     expect(fs.existsSync(path.dirname(staged))).toBe(false);
+    expect(indexed).toHaveBeenCalledExactlyOnceWith(path.relative(mediaDir, completed), undefined);
+    expect(catalog.status).toMatchObject({ running: false, total: 0, lastScanAt: "" });
+    libraryDb.close();
   });
 
   it("restarts an interrupted download after the server starts again", async () => {
@@ -155,11 +161,14 @@ describe("DownloadQueue", () => {
     const source = db.addSource(person.id, "test.command", { externalId: "source", label: "Source", profileUrl: "https://example.test/profile", domain: "example.test" });
     db.ingestItems(source, [{ externalId: "clip", pageUrl: "https://example.test/clip", mediaType: "video", filename: "clip.mp4", publishedAt: "2021-03-04T12:30:00Z" }]);
     const item = db.listItems()[0]; db.setItemStatus(item.id, "queued");
-    const queue = new DownloadQueue(db, manager, mediaDir); queue.start();
-    await waitFor(() => db.getItem(item.id)?.status === "completed"); queue.stop();
+    const log = vi.fn();
+    const queue = new DownloadQueue(db, manager, mediaDir, log, () => { throw new Error("Catalog busy"); }); queue.start();
+    await waitFor(() => log.mock.calls.some((call) => call[2] === "Library indexing failed")); queue.stop();
+    expect(db.getItem(item.id)?.status).toBe("completed");
     const completed = path.join(mediaDir, "Command Performer", "example.test", "clip.mp4");
     expect(fs.readFileSync(completed, "utf8")).toBe("command media");
     expect(fs.statSync(completed).mtime.toISOString()).toBe("2021-03-04T12:30:00.000Z");
+    expect(log).toHaveBeenCalledWith("warn", "library", "Library indexing failed", expect.objectContaining({ relativePath: path.relative(mediaDir, completed), error: expect.any(Error) }));
   });
 
   it("persists command extractor percentage and downloaded bytes while running", async () => {

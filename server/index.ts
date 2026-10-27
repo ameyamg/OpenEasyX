@@ -21,6 +21,7 @@ import { restoreLiveCamPerformers } from "./live-cam-restore.js";
 import { PluginRepositoryManager } from "./plugin-repositories.js";
 import { LibraryDatabase } from "./library-database.js";
 import { Catalog } from "./catalog.js";
+import { catalogScanIntervalMs, scheduleCatalogScans } from "./catalog-scheduler.js";
 import { registerLibraryRoutes } from "./library-routes.js";
 import { settingsSchema } from "./output-settings.js";
 import { exportBackup, importBackup, parseBackup } from "./backup.js";
@@ -32,7 +33,7 @@ const port = Number(process.env.PORT ?? 3210);
 const dataDir = path.resolve(process.env.EASYX_DATA_DIR ?? "data");
 const mediaDir = path.resolve(process.env.EASYX_MEDIA_DIR ?? "media");
 const externalPluginsDir = path.resolve(process.env.EASYX_EXTERNAL_PLUGINS_DIR ?? "plugins-external");
-const scanIntervalMinutes = Math.max(1, Number(process.env.EASYX_SCAN_INTERVAL_MINUTES ?? 10));
+const scanIntervalMs = catalogScanIntervalMs(process.env.EASYX_SCAN_INTERVAL_MINUTES);
 const appVersion = process.env.APP_VERSION?.trim() || "dev";
 const logStore = new LogStore();
 const appLogger = pino({ level: process.env.EASYX_LOG_LEVEL ?? "info" }, logStore.stream);
@@ -44,7 +45,7 @@ const pluginRepositories = new PluginRepositoryManager(dataDir, path.resolve("pl
 const plugins = new PluginManager(db, pluginRepositories.roots(), path.join(dataDir, "sessions"), writeLog);
 await plugins.load();
 const queue = new DownloadQueue(
-  db, plugins, mediaDir, writeLog, () => catalog.scan(),
+  db, plugins, mediaDir, writeLog, (relativePath, replacedPath) => catalog.indexStoredMedia(relativePath, replacedPath),
   (item) => catalog.deleteStoredMedia(item.storagePath!),
 );
 const browserLogin = new BrowserLoginManager(dataDir);
@@ -641,6 +642,7 @@ if (fs.existsSync(webRoot)) {
 let subtitleWorker: ChildProcess | undefined;
 let subtitleWorkerRestart: NodeJS.Timeout | undefined;
 let shuttingDown = false;
+let stopCatalogScans: (() => void) | undefined;
 function startEmbeddedSubtitleWorker() {
   if (process.env.EASYX_EMBEDDED_SUBTITLE_WORKER !== "true" || shuttingDown) return;
   subtitleWorker = spawn(process.env.EASYX_SUBTITLE_PYTHON || "/opt/subtitles/bin/python", ["-m", "worker.subtitles"], { cwd: path.resolve("."), env: process.env, stdio: ["ignore", "inherit", "inherit"] });
@@ -656,7 +658,7 @@ function startEmbeddedSubtitleWorker() {
 const shutdown = async () => {
   // A second signal while live recordings are being saved exits at once; they are recovered on the next start.
   if (shuttingDown) process.exit(0);
-  shuttingDown = true; await queue.shutdown(); if (subtitleWorkerRestart) clearTimeout(subtitleWorkerRestart); subtitleWorker?.kill("SIGTERM");
+  shuttingDown = true; stopCatalogScans?.(); await queue.shutdown(); if (subtitleWorkerRestart) clearTimeout(subtitleWorkerRestart); subtitleWorker?.kill("SIGTERM");
   await browserLogin.stop(); await app.close(); libraryDb.close(); db.close(); process.exit(0);
 };
 process.on("SIGTERM", shutdown); process.on("SIGINT", shutdown);
@@ -664,5 +666,4 @@ await app.listen({ port, host: "0.0.0.0" });
 startEmbeddedSubtitleWorker();
 setTimeout(() => refreshLiveCamFavorites(), 500).unref();
 setInterval(() => refreshLiveCamFavorites(), 5 * 60_000).unref();
-setTimeout(() => void catalog.scan().catch((error) => app.log.error(error, "Initial library scan failed")), 250).unref();
-setInterval(() => void catalog.scan().catch((error) => app.log.error(error, "Scheduled library scan failed")), scanIntervalMinutes * 60_000).unref();
+stopCatalogScans = scheduleCatalogScans(catalog, scanIntervalMs, (error) => app.log.error(error, "Library scan failed"));

@@ -133,6 +133,8 @@ Some streams drop audio for a moment (a lost segment or the performer's encoder)
 
 Important environment variables include `PUID`, `PGID`, `EASYX_SCAN_INTERVAL_MINUTES`, `EASYX_WHISPER_MODEL`, `EASYX_TRANSLATION_MODEL`, and `EASYX_LOG_LEVEL`.
 
+Completed downloads and recovered recordings appear in the library through targeted file indexing. A full scan runs at startup and every **60 minutes** after the previous scan finishes, to find files added or removed outside Open EasyX. Unchanged catalog rows are left untouched. Use **Scan library** for an immediate full scan. `EASYX_SCAN_INTERVAL_MINUTES` changes the automatic interval; existing installations explicitly configured with the old value `10` should change it to `60` or higher.
+
 ## Container publishing
 
 Every push to `main` runs tests, TypeScript, the production web build, a Docker build, and runtime checks. A successful push automatically creates a `YEAR.WEEK.N` version (for example `2026.35.1`), publishes the multi-architecture image to `ghcr.io/raccommode/open-easyx` with both that version and `latest`, injects the version into the application, and creates the matching GitHub Release. Pull requests run the same checks without publishing a release.
